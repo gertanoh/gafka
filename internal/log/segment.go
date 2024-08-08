@@ -23,7 +23,7 @@ func newSegment(dir string, baseOffset uint64, c Config) (*segment, error) {
 	}
 	var err error
 	storeFile, err := os.OpenFile(
-		path.Join(dir, fmt.Sprintf("%d%s", baseOffset, ".store")),
+		path.Join(dir, fmt.Sprintf("%d%s", baseOffset, ".log")),
 		os.O_RDWR|os.O_CREATE|os.O_APPEND,
 		0644,
 	)

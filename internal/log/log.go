@@ -1,3 +1,6 @@
+// Package handles low level internals of the log
+// Data is handled by a segment and an mmap index files to speed up access
+
 package log
 
 import (
