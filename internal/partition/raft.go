@@ -230,6 +230,7 @@ func (p *Partition) setupRaft(dataDir string) error {
 		return err
 	}
 
+	p.raft.raftNet = NewTransport(transport)
 	config := raft.DefaultConfig()
 	config.LocalID = p.raft.LocalID
 	// below constants are to speed up tests
@@ -252,7 +253,7 @@ func (p *Partition) setupRaft(dataDir string) error {
 		logStore,
 		stableStore,
 		snapshotStore,
-		transport,
+		p.raft.raftNet,
 	)
 
 	if err != nil {

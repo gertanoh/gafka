@@ -22,7 +22,8 @@ var (
 )
 
 const (
-	AppliedDelay = 100 * time.Millisecond
+	AppliedDelayTicker = 100 * time.Millisecond
+	WaitAppliedFSM     = 1 * time.Second
 )
 
 type Partition struct {
@@ -33,6 +34,7 @@ type Partition struct {
 	mu        sync.RWMutex
 	raft      struct {
 		raft.Config
+		raftNet  *Transport
 		BindAddr string
 		Boostrap bool
 	}
@@ -83,13 +85,21 @@ func (p *Partition) Write(message []byte) error {
 	return nil
 }
 
-// Read from any node. Might serve stale read
-func (p *Partition) ReadNonLinear(offset uint64) ([]byte, error) {
-	return p.Log.Read(offset)
+// Return leader commit index. For followers, it is retrieved atomically from the appendentries sent by the leader over the network
+func (p *Partition) LeaderCommitIndex() (uint64, error) {
+	if p.raftNode.State() == raft.Leader {
+		return p.raftNode.CommitIndex(), nil
+	}
+	return p.raft.raftNet.LeaderCommitIndex(), nil
 }
 
-// Read served from Read, check are applied to prevent loss of leadership
-func (p *Partition) ReadLinearFromLeader(offset uint64) ([]byte, error) {
+// Read from any node local storage. Might serve stale read
+func (p *Partition) ReadNonLinear(idx uint64) ([]byte, error) {
+	return p.Log.Read(idx), nil
+}
+
+// Read served from Leader, check are applied to prevent loss of leadership
+func (p *Partition) ReadLinearFromLeader(idx uint64) ([]byte, error) {
 	if p.raftNode.State() != raft.Leader {
 		return nil, ErrNotLeader
 	}
@@ -98,18 +108,30 @@ func (p *Partition) ReadLinearFromLeader(offset uint64) ([]byte, error) {
 		return nil, ErrNotLeader
 	}
 	// wait for commit index to match appliedIndex
-	if p.WaitForAppliedIndex(offset, 1*time.Second) != nil {
+	if p.WaitForAppliedIndex(idx, 1*time.Second) != nil {
 		return nil, ErrTimeoutWaitingForApplied
 	}
-	return p.Log.Read(offset)
+	return p.Log.Read(idx), nil
 }
 
 // Read is done from follower/leader, attempt to implement readIndex optimization
-// Due to the network call to get the commit index, this function has a higher latency
-func (p *Partition) Read(offset uint64) ([]byte, error) {
+func (p *Partition) Read(idx uint64) ([]byte, error) {
 	// Get leader commit Index
 	// called WaitForAppliedIndex
-	return nil, nil
+	if p.raftNode.State() == raft.Leader {
+		return p.ReadLinearFromLeader(idx)
+	}
+
+	leaderCommitIdx, err := p.LeaderCommitIndex()
+	if err != nil {
+		zap.S().Error("failed to get leader commit index", zap.Error(err))
+		return nil, err
+	}
+	// wait for local commit index to be applied to fsm
+	if p.WaitForAppliedIndex(leaderCommitIdx, WaitAppliedFSM) != nil {
+		return nil, ErrTimeoutWaitingForApplied
+	}
+	return p.Log.Read(idx), nil
 }
 
 func (p *Partition) WaitForAppliedIndex(offset uint64, timeout time.Duration) error {
