@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"kafka-like/internal/log"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/gertanoh/gafka/internal/log"
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
@@ -97,7 +98,7 @@ func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 }
 
 func (l *logStore) StoreLog(record *raft.Log) error {
-	return l.log.StoreLogs([]*raft.Log{record})
+	return l.StoreLogs([]*raft.Log{record})
 }
 
 func (l *logStore) StoreLogs(records []*raft.Log) error {
@@ -133,7 +134,7 @@ func (l *fsm) Apply(record *raft.Log) interface{} {
 	reqType := RequestType(buf[0])
 	switch reqType {
 	case AppendRequestType:
-		return l.log.applyAppend(buf[1:])
+		return l.applyAppend(buf[1:])
 	}
 	return nil
 }
@@ -162,30 +163,31 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 }
 
 func (f *fsm) Restore(reader io.ReadCloser) error {
-	b := make([]byte, log.lenWidth)
+	b := make([]byte, log.EncLenWidth)
 	var buf bytes.Buffer
 	for i := 0; ; i++ {
 		_, err := io.ReadFull(reader, b)
 		if err == io.EOF {
 			break
 		}
-		size := int64(log.enc.Uint64(b))
+		size := int64(log.Enc.Uint64(b))
 		if _, err = io.CopyN(&buf, reader, size); err != nil {
 			return err
 		}
 
-		var rec record
-		if err = json.Unmarshal(buf.Bytes(), rec); err != nil {
-			return err
-		}
+		// var rec record
+		// if err = json.Unmarshal(buf.Bytes(), rec); err != nil {
+		// 	return err
+		// }
 
-		if i == 0 {
-			f.log.Config.Segment.InitialOffset = rec.offset
-			if err := f.log.Reset(); err != nil {
-				return err
-			}
-		}
-		if _, err = f.log.Append(record); err != nil {
+		// TODO handle this part
+		// if i == 0 {
+		// 	f.log.Config.Segment.InitialOffset = rec.offset
+		// 	if err := f.log.Reset(); err != nil {
+		// 		return err
+		// 	}
+		// }
+		if _, err = f.log.Append(buf.Bytes()); err != nil {
 			return err
 		}
 		buf.Reset()
@@ -195,13 +197,13 @@ func (f *fsm) Restore(reader io.ReadCloser) error {
 
 func (p *Partition) setupRaft(dataDir string) error {
 
-	fsm := &fsm{log: p.Log}
+	fsm := &fsm{log: p.log}
 
 	logDir := filepath.Join(dataDir, "raft", "log")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return err
 	}
-	logConfig := p.Log.Config
+	logConfig := p.log.Config
 	logConfig.Segment.InitialOffset = 1 // needed by the raft interface
 	logStore, err := newLogStore(logDir, logConfig)
 	if err != nil {

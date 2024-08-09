@@ -88,7 +88,7 @@ func testReader(t *testing.T, log *Log) {
 	require.NoError(t, err)
 
 	require.NoError(t, err)
-	require.Equal(t, append, b[lenWidth:])
+	require.Equal(t, append, b[EncLenWidth:])
 }
 
 func testTruncate(t *testing.T, log *Log) {

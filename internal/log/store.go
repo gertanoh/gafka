@@ -7,12 +7,12 @@ import (
 	"sync"
 )
 
-var enc = binary.BigEndian
+var Enc = binary.BigEndian
 
 const (
 	// length in bytes of the record length
 	// 8 bytes
-	lenWidth = 8
+	EncLenWidth = 8
 )
 
 // File store wrapper
@@ -43,14 +43,14 @@ func (s *store) Append(p []byte) (n uint64, pos uint64, err error) {
 	defer s.mu.Unlock()
 	pos = s.size
 
-	if err := binary.Write(s.buf, enc, uint64(len(p))); err != nil {
+	if err := binary.Write(s.buf, Enc, uint64(len(p))); err != nil {
 		return 0, 0, err
 	}
 	w, err := s.buf.Write(p)
 	if err != nil {
 		return 0, 0, err
 	}
-	w += lenWidth
+	w += EncLenWidth
 	s.size += uint64(w)
 	return uint64(w), pos, nil
 }
@@ -62,13 +62,13 @@ func (s *store) Read(pos uint64) ([]byte, error) {
 		return nil, err
 	}
 
-	size := make([]byte, lenWidth)
+	size := make([]byte, EncLenWidth)
 	if _, err := s.File.ReadAt(size, int64(pos)); err != nil {
 		return nil, err
 	}
 
-	b := make([]byte, enc.Uint64(size))
-	if _, err := s.File.ReadAt(b, int64(pos+lenWidth)); err != nil {
+	b := make([]byte, Enc.Uint64(size))
+	if _, err := s.File.ReadAt(b, int64(pos+EncLenWidth)); err != nil {
 		return nil, err
 	}
 

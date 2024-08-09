@@ -6,10 +6,11 @@ package partition
 import (
 	"bytes"
 	"errors"
-	"kafka-like/internal/log"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/gertanoh/gafka/internal/log"
 
 	"github.com/hashicorp/raft"
 	"go.uber.org/zap"
@@ -29,7 +30,7 @@ const (
 type Partition struct {
 	id        int
 	topicName string
-	Log       *log.Log
+	log       *log.Log
 	raftNode  *raft.Raft
 	mu        sync.RWMutex
 	raft      struct {
@@ -48,7 +49,7 @@ func NewPartition(id int, topicName string, config log.Config) (*Partition, erro
 	}
 
 	var err error
-	p.Log, err = log.NewLog(config)
+	p.log, err = log.NewLog(topicName, config)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +96,7 @@ func (p *Partition) LeaderCommitIndex() (uint64, error) {
 
 // Read from any node local storage. Might serve stale read
 func (p *Partition) ReadNonLinear(idx uint64) ([]byte, error) {
-	return p.Log.Read(idx), nil
+	return p.log.Read(idx)
 }
 
 // Read served from Leader, check are applied to prevent loss of leadership
@@ -111,7 +112,7 @@ func (p *Partition) ReadLinearFromLeader(idx uint64) ([]byte, error) {
 	if p.WaitForAppliedIndex(idx, 1*time.Second) != nil {
 		return nil, ErrTimeoutWaitingForApplied
 	}
-	return p.Log.Read(idx), nil
+	return p.log.Read(idx)
 }
 
 // Read is done from follower/leader, attempt to implement readIndex optimization
@@ -131,11 +132,11 @@ func (p *Partition) Read(idx uint64) ([]byte, error) {
 	if p.WaitForAppliedIndex(leaderCommitIdx, WaitAppliedFSM) != nil {
 		return nil, ErrTimeoutWaitingForApplied
 	}
-	return p.Log.Read(idx), nil
+	return p.log.Read(idx)
 }
 
 func (p *Partition) WaitForAppliedIndex(offset uint64, timeout time.Duration) error {
-	ticker := time.NewTicker(AppliedDelay)
+	ticker := time.NewTicker(AppliedDelayTicker)
 	defer ticker.Stop()
 
 	timer := time.NewTimer(timeout)
