@@ -29,10 +29,10 @@ A Raft instance comprises:
 */
 
 type record struct {
-	data       []byte
-	offset     uint64
-	term       uint64
-	recordType uint32
+	Data       []byte
+	Offset     uint64
+	Term       uint64
+	recordType uint8
 }
 
 func (r *record) serializeRecord() ([]byte, error) {
@@ -90,9 +90,9 @@ func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	if err != nil {
 		return err
 	}
-	out.Data = rec.data
+	out.Data = rec.Data
 	out.Index = index
-	out.Term = rec.term
+	out.Term = rec.Term
 	out.Type = raft.LogType(rec.recordType)
 	return nil
 }
@@ -104,9 +104,9 @@ func (l *logStore) StoreLog(record *raft.Log) error {
 func (l *logStore) StoreLogs(records []*raft.Log) error {
 	for _, raftRec := range records {
 		r := &record{
-			data:       raftRec.Data,
-			term:       raftRec.Term,
-			recordType: uint32(raftRec.Type),
+			Data:       raftRec.Data,
+			Term:       raftRec.Term,
+			recordType: uint8(raftRec.Type),
 		}
 		message, err := r.serializeRecord()
 		if err != nil {
@@ -123,20 +123,8 @@ func (l *logStore) DeleteRange(min, max uint64) error {
 	return l.log.Truncate(max)
 }
 
-type RequestType uint8
-
-const (
-	AppendRequestType RequestType = 0
-)
-
 func (l *fsm) Apply(record *raft.Log) interface{} {
-	buf := record.Data
-	reqType := RequestType(buf[0])
-	switch reqType {
-	case AppendRequestType:
-		return l.applyAppend(buf[1:])
-	}
-	return nil
+	return l.applyAppend(record.Data)
 }
 
 func (l *fsm) applyAppend(data []byte) interface{} {
@@ -175,18 +163,17 @@ func (f *fsm) Restore(reader io.ReadCloser) error {
 			return err
 		}
 
-		// var rec record
-		// if err = json.Unmarshal(buf.Bytes(), rec); err != nil {
-		// 	return err
-		// }
+		var rec record
+		if err = json.Unmarshal(buf.Bytes(), rec); err != nil {
+			return err
+		}
 
-		// TODO handle this part
-		// if i == 0 {
-		// 	f.log.Config.Segment.InitialOffset = rec.offset
-		// 	if err := f.log.Reset(); err != nil {
-		// 		return err
-		// 	}
-		// }
+		if i == 0 {
+			f.log.Config.Segment.InitialOffset = rec.Offset
+			if err := f.log.Reset(); err != nil {
+				return err
+			}
+		}
 		if _, err = f.log.Append(buf.Bytes()); err != nil {
 			return err
 		}
@@ -204,8 +191,8 @@ func (p *Partition) setupRaft(dataDir string) error {
 		return err
 	}
 	logConfig := p.log.Config
-	logConfig.Segment.InitialOffset = 1 // needed by the raft interface
-	logStore, err := newLogStore(logDir, logConfig)
+	logConfig.Segment.InitialOffset = 1             // needed by the raft interface
+	logStore, err := newLogStore(logDir, logConfig) // TODO optimi use log.NewCache
 	if err != nil {
 		return err
 	}
@@ -215,38 +202,37 @@ func (p *Partition) setupRaft(dataDir string) error {
 		return err
 	}
 
-	retain := 1
-	snapshotStore, err := raft.NewFileSnapshotStore(filepath.Join(dataDir, "raft", "snapshot"), retain, os.Stderr)
+	snapshotStore, err := raft.NewFileSnapshotStore(filepath.Join(dataDir, "raft", "snapshot"), 1, os.Stderr)
 	if err != nil {
 		return err
 	}
 
 	maxPool := 5
 	timeout := 10 * time.Second
-	tcpAddr, err := net.ResolveTCPAddr("tcp", p.raft.BindAddr)
+	tcpAddr, err := net.ResolveTCPAddr("tcp", p.config.BindAddr)
 	if err != nil {
 		return err
 	}
-	transport, err := raft.NewTCPTransport(p.raft.BindAddr, tcpAddr, maxPool, timeout, os.Stderr) // TODO let's use global logger here
+	transport, err := raft.NewTCPTransport(p.config.BindAddr, tcpAddr, maxPool, timeout, os.Stderr) // TODO let's use global logger here
 	if err != nil {
 		return err
 	}
 
-	p.raft.raftNet = NewTransport(transport)
+	p.raftNet = NewTransport(transport)
 	config := raft.DefaultConfig()
-	config.LocalID = p.raft.LocalID
+	config.LocalID = p.config.LocalID
 	// below constants are to speed up tests
-	if p.raft.HeartbeatTimeout != 0 {
-		config.HeartbeatTimeout = p.raft.HeartbeatTimeout
+	if p.config.HeartbeatTimeout != 0 {
+		config.HeartbeatTimeout = p.config.HeartbeatTimeout
 	}
-	if p.raft.ElectionTimeout != 0 {
-		config.ElectionTimeout = p.raft.ElectionTimeout
+	if p.config.ElectionTimeout != 0 {
+		config.ElectionTimeout = p.config.ElectionTimeout
 	}
-	if p.raft.LeaderLeaseTimeout != 0 {
-		config.LeaderLeaseTimeout = p.raft.LeaderLeaseTimeout
+	if p.config.LeaderLeaseTimeout != 0 {
+		config.LeaderLeaseTimeout = p.config.LeaderLeaseTimeout
 	}
-	if p.raft.CommitTimeout != 0 {
-		config.CommitTimeout = p.raft.CommitTimeout
+	if p.config.CommitTimeout != 0 {
+		config.CommitTimeout = p.config.CommitTimeout
 	}
 
 	p.raftNode, err = raft.NewRaft(
@@ -255,7 +241,7 @@ func (p *Partition) setupRaft(dataDir string) error {
 		logStore,
 		stableStore,
 		snapshotStore,
-		p.raft.raftNet,
+		p.raftNet,
 	)
 
 	if err != nil {
@@ -267,11 +253,11 @@ func (p *Partition) setupRaft(dataDir string) error {
 	if err != nil {
 		return err
 	}
-	if p.raft.Boostrap && !hasState {
+	if p.config.Boostrap && !hasState {
 		config := raft.Configuration{
 			Servers: []raft.Server{{
 				ID:      config.LocalID,
-				Address: raft.ServerAddress(p.raft.BindAddr),
+				Address: raft.ServerAddress(p.config.BindAddr),
 			}},
 		}
 		err = p.raftNode.BootstrapCluster(config).Error()
