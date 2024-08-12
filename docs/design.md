@@ -70,3 +70,5 @@ Each partition is a log, and is replicated by the replication factor.
 # Resources 
 - https://github.com/rqlite/rqlite/tree/master
 - Book Building Distributed Services in Go
+- https://developer.hashicorp.com/consul/docs/architecture/consensus
+- https://raft.github.io/raft.pdf

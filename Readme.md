@@ -1,6 +1,6 @@
 # Building a gafka : A Kafka like system
 Building a system that resembles Kafka. Producers shall be able to send data to the cluster, while consumers can read it.
-It is for educational purposes, but who knows? It might get bigger.
+It is for educational purposes, but who knows?
 
 
 # Expected Features / Progress of dev
