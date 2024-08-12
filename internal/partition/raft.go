@@ -12,12 +12,12 @@ import (
 	"github.com/gertanoh/gafka/internal/log"
 
 	"github.com/hashicorp/raft"
-	raftboltdb "github.com/hashicorp/raft-boltdb"
+	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	"go.uber.org/zap"
 )
 
 // Raft layer for replication
-// Inspired from book Distributed services in go
+// Inspired from book Distributed services in go and rqlite raft repliation
 /*
 A Raft instance comprises:
 	A finite-state machine that applies the commands you give Raft;
