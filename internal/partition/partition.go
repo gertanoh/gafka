@@ -25,13 +25,20 @@ var (
 const (
 	AppliedDelayTicker = 100 * time.Millisecond
 	WaitAppliedFSM     = 1 * time.Second
+	WriteTimeout       = 10 * time.Second
+)
+
+const (
+	ReadConsistencyDefault = iota // default mode : read from followers node, might fail as follower might not have this offset
+	ReadConsistencyWeak    = 1    // read from leader, check leader state locally
+	ReadConsistencyStrong  = 2    // read from leader, check leader state locally
 )
 
 type Config struct {
 	raft.Config
-	BindAddr string
-	Boostrap bool
-	logConf  log.Config
+	BindAddr  string
+	Bootstrap bool
+	logConf   log.Config
 }
 
 type Partition struct {
@@ -68,14 +75,17 @@ func NewPartition(id int, topicName string, config Config) (*Partition, error) {
 }
 
 func (p *Partition) Write(message []byte) error {
+
+	if p.raftNode.State() != raft.Leader {
+		return ErrNotLeader
+	}
 	var buf bytes.Buffer
 	_, err := buf.Write(message)
 	if err != nil {
 		return err
 	}
 
-	timeout := 10 * time.Second
-	future := p.raftNode.Apply(buf.Bytes(), timeout)
+	future := p.raftNode.Apply(buf.Bytes(), WriteTimeout)
 	if future.Error() != nil {
 		zap.S().Error("Fail to commit log entry", zap.Error(future.Error()))
 		return future.Error()
@@ -96,44 +106,39 @@ func (p *Partition) LeaderCommitIndex() (uint64, error) {
 	return p.raftNet.LeaderCommitIndex(), nil
 }
 
-// Read from any node local storage. Might serve stale read
-func (p *Partition) ReadNonLinear(idx uint64) ([]byte, error) {
-	return p.log.Read(idx)
-}
-
-// Read served from Leader, check are applied to prevent loss of leadership
-func (p *Partition) ReadLinearFromLeader(idx uint64) ([]byte, error) {
-	if p.raftNode.State() != raft.Leader {
-		return nil, ErrNotLeader
-	}
-	future := p.raftNode.VerifyLeader()
-	if future.Error() != nil {
-		return nil, ErrNotLeader
-	}
-	// wait for commit index to match appliedIndex
-	if p.WaitForAppliedIndex(idx, 1*time.Second) != nil {
-		return nil, ErrTimeoutWaitingForApplied
-	}
-	return p.log.Read(idx)
-}
-
 // Read is done from follower/leader, attempt to implement readIndex optimization
-func (p *Partition) Read(idx uint64) ([]byte, error) {
-	// Get leader commit Index
-	// called WaitForAppliedIndex
-	if p.raftNode.State() == raft.Leader {
-		return p.ReadLinearFromLeader(idx)
+func (p *Partition) Read(idx uint64, consistencyLevel uint8) ([]byte, error) {
+
+	if consistencyLevel == ReadConsistencyStrong { // read only from leader
+		if p.raftNode.State() != raft.Leader {
+			return nil, ErrNotLeader
+		}
+		future := p.raftNode.VerifyLeader()
+		if future.Error() != nil {
+			return nil, ErrNotLeader
+		}
+		if p.WaitForAppliedIndex(p.raftNode.CommitIndex(), WaitAppliedFSM) != nil {
+			return nil, ErrTimeoutWaitingForApplied
+		}
+	} else if consistencyLevel == ReadConsistencyWeak { // Read from any node, from follower check that we are up to date
+		var commitIdx uint64
+		if p.raftNode.State() == raft.Leader {
+			commitIdx = p.raftNode.CommitIndex()
+		} else {
+			// Get leader commit Index
+			var err error
+			commitIdx, err = p.LeaderCommitIndex()
+			if err != nil {
+				zap.S().Error("failed to get leader commit index", zap.Error(err))
+				return nil, err
+			}
+		}
+		// wait for local commit index to be applied to fsm
+		if p.WaitForAppliedIndex(commitIdx, WaitAppliedFSM) != nil {
+			return nil, ErrTimeoutWaitingForApplied
+		}
 	}
 
-	leaderCommitIdx, err := p.LeaderCommitIndex()
-	if err != nil {
-		zap.S().Error("failed to get leader commit index", zap.Error(err))
-		return nil, err
-	}
-	// wait for local commit index to be applied to fsm
-	if p.WaitForAppliedIndex(leaderCommitIdx, WaitAppliedFSM) != nil {
-		return nil, ErrTimeoutWaitingForApplied
-	}
 	return p.log.Read(idx)
 }
 
@@ -201,7 +206,12 @@ func (p *Partition) Close() error {
 	if err := future.Error(); err != nil {
 		return err
 	}
+
+	if err := p.raftNet.Close(); err != nil {
+		return err
+	}
 	p.log.Close()
+
 	return nil
 }
 
@@ -217,7 +227,6 @@ func (p *Partition) WaitForLeader(timeout time.Duration) (string, error) {
 		return false
 	}
 
-	// try the fast path
 	if check() {
 		return leaderAddr, nil
 	}

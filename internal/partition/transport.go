@@ -28,6 +28,7 @@ func (ct *Transport) Consumer() <-chan raft.RPC {
 	ch := make(chan raft.RPC)
 	srcCh := ct.NetworkTransport.Consumer()
 	go func() {
+		defer close(ch)
 		for rpc := range srcCh {
 			if cmd, ok := rpc.Command.(*raft.AppendEntriesRequest); ok {
 				ct.leaderCommitIndex.Store(cmd.LeaderCommitIndex)

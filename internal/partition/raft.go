@@ -28,13 +28,20 @@ A Raft instance comprises:
 	A transport that Raft uses to connect with the server’s peers.
 */
 
+const (
+	raftTransportMaxPool = 5
+	raftTransportTimeout = 10 * time.Second
+	snapshotRetain       = 2
+)
+
 type record struct {
 	Data       []byte
 	Offset     uint64
 	Term       uint64
-	recordType uint8
+	RecordType uint8
 }
 
+// Possible optim use protobuf
 func (r *record) serializeRecord() ([]byte, error) {
 	bin, err := json.Marshal(r)
 	if err != nil {
@@ -54,6 +61,8 @@ type fsm struct {
 }
 
 var _ raft.FSM = (*fsm)(nil)
+
+// use log structure for log store. Will increase testing
 var _ raft.LogStore = (*logStore)(nil)
 
 type snapshot struct {
@@ -84,6 +93,7 @@ func (l *logStore) LastIndex() (uint64, error) {
 func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	in, err := l.log.Read(index)
 	if err != nil {
+		zap.S().Error("GetLog : fail to read", zap.Error(err))
 		return err
 	}
 	rec, err := deserializeRecord(in)
@@ -93,7 +103,7 @@ func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	out.Data = rec.Data
 	out.Index = index
 	out.Term = rec.Term
-	out.Type = raft.LogType(rec.recordType)
+	out.Type = raft.LogType(rec.RecordType)
 	return nil
 }
 
@@ -106,13 +116,13 @@ func (l *logStore) StoreLogs(records []*raft.Log) error {
 		r := &record{
 			Data:       raftRec.Data,
 			Term:       raftRec.Term,
-			recordType: uint8(raftRec.Type),
+			RecordType: uint8(raftRec.Type),
 		}
 		message, err := r.serializeRecord()
 		if err != nil {
 			return err
 		}
-		if _, err := l.log.Append(message); err != nil {
+		if _, err = l.log.Append(message); err != nil {
 			return err
 		}
 	}
@@ -164,7 +174,7 @@ func (f *fsm) Restore(reader io.ReadCloser) error {
 		}
 
 		var rec record
-		if err = json.Unmarshal(buf.Bytes(), rec); err != nil {
+		if err = json.Unmarshal(buf.Bytes(), &rec); err != nil {
 			return err
 		}
 
@@ -184,6 +194,30 @@ func (f *fsm) Restore(reader io.ReadCloser) error {
 
 func (p *Partition) setupRaft(dataDir string) error {
 
+	config := raft.DefaultConfig()
+	config.LocalID = p.config.LocalID
+
+	// config.Logger = hclog.New(&hclog.LoggerOptions{
+	// 	Name:       "raft",
+	// 	Level:      hclog.Debug,
+	// 	Output:     os.Stderr,
+	// 	JSONFormat: true,
+	// })
+
+	// below constants are to speed up tests
+	if p.config.HeartbeatTimeout != 0 {
+		config.HeartbeatTimeout = p.config.HeartbeatTimeout
+	}
+	if p.config.ElectionTimeout != 0 {
+		config.ElectionTimeout = p.config.ElectionTimeout
+	}
+	if p.config.LeaderLeaseTimeout != 0 {
+		config.LeaderLeaseTimeout = p.config.LeaderLeaseTimeout
+	}
+	if p.config.CommitTimeout != 0 {
+		config.CommitTimeout = p.config.CommitTimeout
+	}
+
 	fsm := &fsm{log: p.log}
 
 	logDir := filepath.Join(dataDir, "raft", "log")
@@ -202,38 +236,21 @@ func (p *Partition) setupRaft(dataDir string) error {
 		return err
 	}
 
-	snapshotStore, err := raft.NewFileSnapshotStore(filepath.Join(dataDir, "raft", "snapshot"), 1, os.Stderr)
+	snapshotStore, err := raft.NewFileSnapshotStore(filepath.Join(dataDir, "raft", "snapshot"), snapshotRetain, os.Stderr)
 	if err != nil {
 		return err
 	}
 
-	maxPool := 5
-	timeout := 10 * time.Second
 	tcpAddr, err := net.ResolveTCPAddr("tcp", p.config.BindAddr)
 	if err != nil {
 		return err
 	}
-	transport, err := raft.NewTCPTransport(p.config.BindAddr, tcpAddr, maxPool, timeout, os.Stderr) // TODO let's use global logger here
+	transport, err := raft.NewTCPTransport(p.config.BindAddr, tcpAddr, raftTransportMaxPool, raftTransportTimeout, os.Stderr) // TODO let's use global logger here
 	if err != nil {
 		return err
 	}
 
 	p.raftNet = NewTransport(transport)
-	config := raft.DefaultConfig()
-	config.LocalID = p.config.LocalID
-	// below constants are to speed up tests
-	if p.config.HeartbeatTimeout != 0 {
-		config.HeartbeatTimeout = p.config.HeartbeatTimeout
-	}
-	if p.config.ElectionTimeout != 0 {
-		config.ElectionTimeout = p.config.ElectionTimeout
-	}
-	if p.config.LeaderLeaseTimeout != 0 {
-		config.LeaderLeaseTimeout = p.config.LeaderLeaseTimeout
-	}
-	if p.config.CommitTimeout != 0 {
-		config.CommitTimeout = p.config.CommitTimeout
-	}
 
 	p.raftNode, err = raft.NewRaft(
 		config,
@@ -253,15 +270,21 @@ func (p *Partition) setupRaft(dataDir string) error {
 	if err != nil {
 		return err
 	}
-	if p.config.Boostrap && !hasState {
-		config := raft.Configuration{
+
+	if p.config.Bootstrap && !hasState {
+		raftConfiguration := raft.Configuration{
 			Servers: []raft.Server{{
-				ID:      config.LocalID,
-				Address: raft.ServerAddress(p.config.BindAddr),
+				ID:       config.LocalID,
+				Address:  transport.LocalAddr(),
+				Suffrage: raft.Voter,
 			}},
 		}
-		err = p.raftNode.BootstrapCluster(config).Error()
+		err = p.raftNode.BootstrapCluster(raftConfiguration).Error()
+		if err != nil {
+			zap.S().Error("Failed to bootstrap cluster", zap.Error(err))
+			return err
+		}
 	}
 
-	return err
+	return nil
 }

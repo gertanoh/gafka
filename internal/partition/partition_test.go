@@ -3,6 +3,7 @@ package partition
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -10,27 +11,51 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/travisjeffery/go-dynaport"
+	"go.uber.org/zap"
 )
 
-func TestNewPartition(t *testing.T) {
+func initTestLogger() {
+	config := zap.NewDevelopmentConfig()
+	config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	config.OutputPaths = []string{"stdout"}
+	logger, _ := config.Build()
+	zap.ReplaceGlobals(logger)
+}
+
+func TestSinglePartition(t *testing.T) {
+
+	initTestLogger()
+
 	dir, err := os.MkdirTemp("", "partition-test")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
 	p, err := setupTestPartition(t, 0)
 	defer teardownTestPartition(p)
-
-	require.NoError(t, err)
+	require.Nil(t, err)
 	assert.NotNil(t, p)
 	assert.Equal(t, 1, p.id)
 	assert.Equal(t, "test-topic", p.topicName)
+	leaderAddr, leaderId := p.raftNode.LeaderWithID()
+	assert.NotEqual(t, string(leaderAddr), "")
+	assert.NotEqual(t, string(leaderId), "")
+}
 
+// Test shall fail as leader is not yet elected
+func TestPartitionWriteFailAsNoLeader(t *testing.T) {
+	p, err := setupTestPartition(t, 1)
+	defer teardownTestPartition(p)
+
+	require.NoError(t, err)
+	assert.NotNil(t, p)
+
+	err = p.Write([]byte("test message"))
+	assert.NotNil(t, err)
 }
 
 func TestPartitionWrite(t *testing.T) {
 	p, err := setupTestPartition(t, 0)
 	defer teardownTestPartition(p)
-
 	require.NoError(t, err)
 	assert.NotNil(t, p)
 
@@ -38,128 +63,116 @@ func TestPartitionWrite(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// func TestPartitionReadNonLinear(t *testing.T) {
-// 	p := setupTestPartition(t)
-// 	defer teardownTestPartition(p)
+func TestSinglePartitionReadStrong(t *testing.T) {
+	p, err := setupTestPartition(t, 0)
+	defer teardownTestPartition(p)
+	require.NoError(t, err)
 
-// 	message := []byte("test message")
-// 	err := p.Write(message)
-// 	require.NoError(t, err)
+	message := []byte("test message")
+	err = p.Write(message)
+	require.NoError(t, err)
 
-// 	// Wait for the write to be applied
-// 	time.Sleep(100 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		read, err := p.Read(0, ReadConsistencyStrong)
+		if err != nil {
+			return false
+		}
+		if !reflect.DeepEqual(message, read) {
+			return false
+		}
+		return true
 
-// 	read, err := p.ReadNonLinear(0)
-// 	assert.NoError(t, err)
-// 	assert.Equal(t, message, read)
-// }
+	}, 500*time.Millisecond, 50*time.Millisecond)
+}
 
-// func TestPartitionReadLinearFromLeader(t *testing.T) {
-// 	p := setupTestPartition(t)
-// 	defer teardownTestPartition(p)
+func TestSinglePartitionReadDefault(t *testing.T) {
+	p, err := setupTestPartition(t, 0)
+	defer teardownTestPartition(p)
+	require.NoError(t, err)
 
-// 	message := []byte("test message")
-// 	err := p.Write(message)
-// 	require.NoError(t, err)
+	message := []byte("test message")
+	err = p.Write(message)
+	require.NoError(t, err)
 
-// 	// Wait for the write to be applied
-// 	time.Sleep(100 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		read, err := p.Read(0, ReadConsistencyDefault)
+		if err != nil {
+			return false
+		}
+		if !reflect.DeepEqual(message, read) {
+			return false
+		}
+		return true
 
-// 	read, err := p.ReadLinearFromLeader(0)
-// 	assert.NoError(t, err)
-// 	assert.Equal(t, message, read)
-// }
+	}, 500*time.Millisecond, 50*time.Millisecond)
+}
 
-// func TestPartitionLeaderElection(t *testing.T) {
-// 	p := setupTestPartition(t)
-// 	defer teardownTestPartition(p)
+func TestSinglePartitionReadWeak(t *testing.T) {
+	p, err := setupTestPartition(t, 0)
+	defer teardownTestPartition(p)
+	require.NoError(t, err)
 
-// 	// Wait for leader election
-// 	time.Sleep(1 * time.Second)
+	message := []byte("test message")
+	err = p.Write(message)
+	require.NoError(t, err)
 
-// 	assert.Equal(t, raft.Leader, p.raftNode.State())
-// }
+	require.Eventually(t, func() bool {
+		read, err := p.Read(0, ReadConsistencyWeak)
+		if err != nil {
+			return false
+		}
+		if !reflect.DeepEqual(message, read) {
+			return false
+		}
+		return true
 
-// func TestPartitionFollowerReplication(t *testing.T) {
-// 	// This test requires setting up multiple nodes in a Raft cluster
-// 	// Implement mock followers or use a test Raft implementation
-// 	t.Skip("Implement follower replication test")
-// }
+	}, 500*time.Millisecond, 50*time.Millisecond)
+}
 
-// func TestPartitionLeaderChange(t *testing.T) {
-// 	// This test requires setting up multiple nodes and forcing a leader change
-// 	t.Skip("Implement leader change test")
-// }
+func TestPartitionLeaderElection(t *testing.T) {
+	p, err := setupTestPartition(t, 0)
+	defer teardownTestPartition(p)
+	require.NoError(t, err)
 
-// func TestPartitionReadConsistencyLevels(t *testing.T) {
-// 	p := setupTestPartition(t)
-// 	defer teardownTestPartition(p)
+	assert.Equal(t, raft.Leader, p.raftNode.State())
+}
 
-// 	message := []byte("test message")
-// 	err := p.Write(message)
-// 	require.NoError(t, err)
+func TestPartitionFollowerReplication(t *testing.T) {
+	t.Skip("Implement follower replication test")
+}
 
-// 	// Test different read methods
-// 	nonLinearRead, err := p.ReadNonLinear(0)
-// 	assert.NoError(t, err)
-// 	assert.Equal(t, message, nonLinearRead)
+func TestPartitionLeaderChange(t *testing.T) {
+	t.Skip("Implement leader change test")
+}
 
-// 	linearRead, err := p.ReadLinearFromLeader(0)
-// 	assert.NoError(t, err)
-// 	assert.Equal(t, message, linearRead)
-
-// 	readIndexRead, err := p.Read(0)
-// 	assert.NoError(t, err)
-// 	assert.Equal(t, message, readIndexRead)
-// }
-
-// func TestPartitionRecoveryAfterCrash(t *testing.T) {
-// 	p := setupTestPartition(t)
-
-// 	message := []byte("test message")
-// 	err := p.Write(message)
-// 	require.NoError(t, err)
-
-// 	// Simulate a crash by closing the partition
-// 	p.raftNode.Shutdown()
-
-// 	// Recreate the partition
-// 	newP, err := NewPartition(p.id, p.topicName, log.Config{})
-// 	require.NoError(t, err)
-// 	defer teardownTestPartition(newP)
-
-// 	// Wait for the new partition to elect a leader
-// 	time.Sleep(1 * time.Second)
-
-// 	// Verify that the data is still there
-// 	read, err := newP.ReadNonLinear(0)
-// 	assert.NoError(t, err)
-// 	assert.Equal(t, message, read)
-// }
+func TestPartitionRecoveryAfterCrash(t *testing.T) {
+	t.Skip("Implement recovery after crash")
+}
 
 func setupTestPartition(t *testing.T, idx int) (*Partition, error) {
 	_, err := os.MkdirTemp("", "partition-test")
+	_ = os.Remove("test-topic")
 	require.NoError(t, err)
 
 	config := Config{}
 	config.LocalID = raft.ServerID(fmt.Sprintf("%d", idx))
-	config.HeartbeatTimeout = 50 * time.Millisecond
-	config.ElectionTimeout = 50 * time.Millisecond
-	config.LeaderLeaseTimeout = 50 * time.Millisecond
+	config.HeartbeatTimeout = 100 * time.Millisecond
+	config.ElectionTimeout = 100 * time.Millisecond
+	config.LeaderLeaseTimeout = 100 * time.Millisecond
 	config.CommitTimeout = 5 * time.Millisecond
 	if idx == 0 {
-		config.Boostrap = true
+		config.Bootstrap = true
 	}
 	ports := dynaport.Get(1)
 	config.BindAddr = fmt.Sprintf("%s:%d", "127.0.0.1", ports[0])
 
 	p, err := NewPartition(1, "test-topic", config)
-	if config.Boostrap {
-		_, err = p.WaitForLeader(2 * time.Second)
-		require.NoError(t, err)
+	if err != nil {
+		return nil, err
 	}
-	require.NoError(t, err)
-
+	if idx == 0 {
+		_, err = p.WaitForLeader(10 * time.Second)
+	}
 	return p, err
 }
 
