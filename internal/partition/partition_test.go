@@ -22,6 +22,8 @@ func initTestLogger() {
 	zap.ReplaceGlobals(logger)
 }
 
+const DEFAULT_TOPIC_NAME = "test-topic"
+
 func TestSinglePartition(t *testing.T) {
 
 	initTestLogger()
@@ -30,12 +32,12 @@ func TestSinglePartition(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
-	p, err := setupTestPartition(t, 0)
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
 	defer teardownTestPartition(p)
 	require.Nil(t, err)
 	assert.NotNil(t, p)
-	assert.Equal(t, 1, p.id)
-	assert.Equal(t, "test-topic", p.topicName)
+	assert.Equal(t, 0, p.id)
+	assert.Equal(t, DEFAULT_TOPIC_NAME, p.topicName)
 	leaderAddr, leaderId := p.raftNode.LeaderWithID()
 	assert.NotEqual(t, string(leaderAddr), "")
 	assert.NotEqual(t, string(leaderId), "")
@@ -43,7 +45,7 @@ func TestSinglePartition(t *testing.T) {
 
 // Test shall fail as leader is not yet elected
 func TestPartitionWriteFailAsNoLeader(t *testing.T) {
-	p, err := setupTestPartition(t, 1)
+	p, err := setupTestPartition(1, DEFAULT_TOPIC_NAME)
 	defer teardownTestPartition(p)
 
 	require.NoError(t, err)
@@ -54,7 +56,7 @@ func TestPartitionWriteFailAsNoLeader(t *testing.T) {
 }
 
 func TestPartitionWrite(t *testing.T) {
-	p, err := setupTestPartition(t, 0)
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
 	defer teardownTestPartition(p)
 	require.NoError(t, err)
 	assert.NotNil(t, p)
@@ -64,7 +66,7 @@ func TestPartitionWrite(t *testing.T) {
 }
 
 func TestSinglePartitionReadStrong(t *testing.T) {
-	p, err := setupTestPartition(t, 0)
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
 	defer teardownTestPartition(p)
 	require.NoError(t, err)
 
@@ -86,7 +88,7 @@ func TestSinglePartitionReadStrong(t *testing.T) {
 }
 
 func TestSinglePartitionReadDefault(t *testing.T) {
-	p, err := setupTestPartition(t, 0)
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
 	defer teardownTestPartition(p)
 	require.NoError(t, err)
 
@@ -108,7 +110,7 @@ func TestSinglePartitionReadDefault(t *testing.T) {
 }
 
 func TestSinglePartitionReadWeak(t *testing.T) {
-	p, err := setupTestPartition(t, 0)
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
 	defer teardownTestPartition(p)
 	require.NoError(t, err)
 
@@ -129,8 +131,34 @@ func TestSinglePartitionReadWeak(t *testing.T) {
 	}, 500*time.Millisecond, 50*time.Millisecond)
 }
 
+func TestSinglePartitionReadDefaultInvalidOffset(t *testing.T) {
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
+	defer teardownTestPartition(p)
+	require.NoError(t, err)
+
+	message := []byte("test message")
+	err = p.Write(message)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		_, err := p.Read(10, ReadConsistencyDefault)
+
+		return err != nil
+
+	}, 500*time.Millisecond, 50*time.Millisecond)
+}
+
+func TestSinglePartitionReadDefaultInvalidOffset_no_write(t *testing.T) {
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
+	defer teardownTestPartition(p)
+	require.NoError(t, err)
+
+	_, err = p.Read(0, ReadConsistencyDefault)
+	require.NotNil(t, err)
+}
+
 func TestPartitionLeaderElection(t *testing.T) {
-	p, err := setupTestPartition(t, 0)
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
 	defer teardownTestPartition(p)
 	require.NoError(t, err)
 
@@ -138,7 +166,28 @@ func TestPartitionLeaderElection(t *testing.T) {
 }
 
 func TestPartitionFollowerReplication(t *testing.T) {
-	t.Skip("Implement follower replication test")
+	partitions := make([]*Partition, 3)
+	for idx := range partitions {
+		var err error
+		partitions[idx], err = setupTestPartition(idx, DEFAULT_TOPIC_NAME)
+		defer teardownTestPartition(partitions[idx])
+		require.NoError(t, err)
+		if idx != 0 {
+			err = partitions[0].Join(fmt.Sprintf("%d", idx), string(partitions[idx].raftNet.LocalAddr()))
+			require.Nil(t, err)
+		}
+	}
+	time.Sleep(5 * time.Second)
+	require.Eventually(t, func() bool {
+		servers, err := partitions[0].GetServers()
+		if err != nil {
+			return false
+		}
+		require.Equal(t, 3, len(servers))
+		fmt.Printf("servers : %+v", servers)
+		return true
+
+	}, 500*time.Millisecond, 50*time.Millisecond)
 }
 
 func TestPartitionLeaderChange(t *testing.T) {
@@ -149,10 +198,7 @@ func TestPartitionRecoveryAfterCrash(t *testing.T) {
 	t.Skip("Implement recovery after crash")
 }
 
-func setupTestPartition(t *testing.T, idx int) (*Partition, error) {
-	_, err := os.MkdirTemp("", "partition-test")
-	_ = os.Remove("test-topic")
-	require.NoError(t, err)
+func setupTestPartition(idx int, topicName string) (*Partition, error) {
 
 	config := Config{}
 	config.LocalID = raft.ServerID(fmt.Sprintf("%d", idx))
@@ -166,7 +212,7 @@ func setupTestPartition(t *testing.T, idx int) (*Partition, error) {
 	ports := dynaport.Get(1)
 	config.BindAddr = fmt.Sprintf("%s:%d", "127.0.0.1", ports[0])
 
-	p, err := NewPartition(1, "test-topic", config)
+	p, err := NewPartition(idx, topicName, config)
 	if err != nil {
 		return nil, err
 	}
@@ -178,5 +224,5 @@ func setupTestPartition(t *testing.T, idx int) (*Partition, error) {
 
 func teardownTestPartition(p *Partition) {
 	p.Close()
-	os.RemoveAll(p.topicName)
+	os.RemoveAll(p.dataDir)
 }

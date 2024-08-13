@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gertanoh/gafka/internal/log"
@@ -41,6 +42,12 @@ type Config struct {
 	logConf   log.Config
 }
 
+type raftServer struct {
+	Id       string
+	Rpc      string
+	isLeader bool
+}
+
 type Partition struct {
 	id        int
 	topicName string
@@ -48,23 +55,25 @@ type Partition struct {
 	raftNode  *raft.Raft
 	raftNet   *Transport
 	config    Config
+	dataDir   string
 }
 
 func NewPartition(id int, topicName string, config Config) (*Partition, error) {
 
 	p := &Partition{}
-	if err := os.MkdirAll(topicName, 0755); err != nil {
+	p.dataDir = topicName + "_" + strconv.Itoa(id)
+	if err := os.MkdirAll(p.dataDir, 0755); err != nil {
 		return nil, err
 	}
 
 	var err error
-	p.log, err = log.NewLog(topicName, config.logConf)
+	p.log, err = log.NewLog(p.dataDir, config.logConf)
 	if err != nil {
 		return nil, err
 	}
 
 	p.config = config
-	if err := p.setupRaft(topicName); err != nil {
+	if err := p.setupRaft(p.dataDir); err != nil {
 		zap.S().Error("Fail to setup raft.", zap.Error(err))
 		return nil, err
 	}
@@ -163,15 +172,10 @@ func (p *Partition) WaitForAppliedIndex(offset uint64, timeout time.Duration) er
 
 // Handle another partition joining the replication cluster
 func (p *Partition) Join(id string, addr string) error {
-	f := p.raftNode.GetConfiguration()
-	if err := f.Error(); err != nil {
-		return err
-	}
-
 	raftConfig := p.raftNode.GetConfiguration()
 	if err := raftConfig.Error(); err != nil {
 		zap.S().Error("failed to retrieve raft configuration", zap.Error(err))
-		return nil
+		return err
 	}
 
 	// check if node is not already present
@@ -248,4 +252,27 @@ func (p *Partition) WaitForLeader(timeout time.Duration) (string, error) {
 			return "", ErrTimeoutWaitingForLeader
 		}
 	}
+}
+
+// return lists of servers in raft cluster
+func (p *Partition) GetServers() ([]raftServer, error) {
+	raftConfig := p.raftNode.GetConfiguration()
+	if err := raftConfig.Error(); err != nil {
+		zap.S().Error("failed to retrieve raft configuration", zap.Error(err))
+		return nil, err
+	}
+
+	var res []raftServer
+
+	// check if node is not already present
+	// serverId and serverAddress need to match, else we will remove the node and add again
+	for _, srv := range raftConfig.Configuration().Servers {
+		raftS := raftServer{
+			Id:       string(srv.ID),
+			Rpc:      string(srv.Address),
+			isLeader: p.raftNode.Leader() == srv.Address,
+		}
+		res = append(res, raftS)
+	}
+	return res, nil
 }
