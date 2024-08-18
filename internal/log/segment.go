@@ -31,7 +31,7 @@ func newSegment(dir string, baseOffset uint64, c Config) (*segment, error) {
 		return nil, err
 	}
 
-	if s.store, err = newStore(storeFile); err != nil {
+	if s.store, err = newStore(storeFile, c.Segment.FlushWrite); err != nil {
 		return nil, err
 	}
 

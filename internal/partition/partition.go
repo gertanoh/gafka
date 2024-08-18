@@ -4,7 +4,6 @@
 package partition
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"github.com/gertanoh/gafka/internal/log"
 
 	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	"go.uber.org/zap"
 )
 
@@ -49,19 +49,21 @@ type raftServer struct {
 }
 
 type Partition struct {
-	id        int
-	topicName string
-	log       *log.Log
-	raftNode  *raft.Raft
-	raftNet   *Transport
-	config    Config
-	dataDir   string
+	id          int
+	topicName   string
+	log         *log.Log
+	raftNode    *raft.Raft
+	raftNet     *Transport
+	logStore    *logStore
+	stableStore *raftboltdb.BoltStore
+	config      Config
+	dataDir     string
 }
 
 func NewPartition(id int, topicName string, config Config) (*Partition, error) {
 
 	p := &Partition{}
-	p.dataDir = topicName + "_" + strconv.Itoa(id)
+	p.dataDir = topicName + "-" + strconv.Itoa(id)
 	if err := os.MkdirAll(p.dataDir, 0755); err != nil {
 		return nil, err
 	}
@@ -88,13 +90,8 @@ func (p *Partition) Write(message []byte) error {
 	if p.raftNode.State() != raft.Leader {
 		return ErrNotLeader
 	}
-	var buf bytes.Buffer
-	_, err := buf.Write(message)
-	if err != nil {
-		return err
-	}
 
-	future := p.raftNode.Apply(buf.Bytes(), WriteTimeout)
+	future := p.raftNode.Apply(message, WriteTimeout)
 	if future.Error() != nil {
 		zap.S().Error("Fail to commit log entry", zap.Error(future.Error()))
 		return future.Error()
@@ -211,6 +208,12 @@ func (p *Partition) Close() error {
 		return err
 	}
 
+	if p.stableStore != nil {
+		p.stableStore.Close()
+	}
+	if p.logStore != nil {
+		p.logStore.log.Close()
+	}
 	if err := p.raftNet.Close(); err != nil {
 		return err
 	}

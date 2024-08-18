@@ -38,3 +38,12 @@ func (ct *Transport) Consumer() <-chan raft.RPC {
 	}()
 	return ch
 }
+
+// TODO need graceful shutdown
+func (ct *Transport) Close() error {
+	if ct.NetworkTransport == nil {
+		return nil
+	}
+
+	return ct.NetworkTransport.Close()
+}

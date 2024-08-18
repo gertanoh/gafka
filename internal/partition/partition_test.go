@@ -1,9 +1,11 @@
 package partition
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -165,7 +167,7 @@ func TestPartitionLeaderElection(t *testing.T) {
 	assert.Equal(t, raft.Leader, p.raftNode.State())
 }
 
-func TestPartitionFollowerReplication(t *testing.T) {
+func TestPartitionCluster(t *testing.T) {
 	partitions := make([]*Partition, 3)
 	for idx := range partitions {
 		var err error
@@ -177,27 +179,178 @@ func TestPartitionFollowerReplication(t *testing.T) {
 			require.Nil(t, err)
 		}
 	}
-	time.Sleep(5 * time.Second)
 	require.Eventually(t, func() bool {
 		servers, err := partitions[0].GetServers()
 		if err != nil {
 			return false
 		}
 		require.Equal(t, 3, len(servers))
-		fmt.Printf("servers : %+v", servers)
+		return true
+
+	}, 500*time.Millisecond, 50*time.Millisecond)
+}
+
+func TestPartitionReadStrong(t *testing.T) {
+	partitions := make([]*Partition, 3)
+	for idx := range partitions {
+		var err error
+		partitions[idx], err = setupTestPartition(idx, DEFAULT_TOPIC_NAME)
+		defer teardownTestPartition(partitions[idx])
+		require.NoError(t, err)
+		if idx != 0 {
+			err = partitions[0].Join(fmt.Sprintf("%d", idx), string(partitions[idx].raftNet.LocalAddr()))
+			require.Nil(t, err)
+		}
+	}
+
+	type TestData struct {
+		Key   string
+		Value string
+	}
+
+	Value := &TestData{
+		Key:   "nb_clicks",
+		Value: "12000",
+	}
+
+	valueBytes, _ := json.Marshal(Value)
+	partitions[0].Write(valueBytes)
+
+	// read from followers shall fail, to update if follower forward is implemented
+	for i := 1; i < 3; i++ {
+		_, err := partitions[i].Read(0, ReadConsistencyStrong)
+		require.NotNil(t, err)
+	}
+
+	// Read from leader
+	got, err := partitions[0].Read(0, ReadConsistencyStrong)
+	require.Nil(t, err)
+	if err != nil {
+		return
+	}
+	require.Equal(t, valueBytes, got)
+}
+
+func TestPartitionRead(t *testing.T) {
+	partitions := make([]*Partition, 3)
+	for idx := range partitions {
+		var err error
+		partitions[idx], err = setupTestPartition(idx, DEFAULT_TOPIC_NAME)
+		defer teardownTestPartition(partitions[idx])
+		require.NoError(t, err)
+		if idx != 0 {
+			err = partitions[0].Join(fmt.Sprintf("%d", idx), string(partitions[idx].raftNet.LocalAddr()))
+			require.Nil(t, err)
+		}
+	}
+
+	type TestData struct {
+		Key   string
+		Value string
+	}
+
+	Value := &TestData{
+		Key:   "nb_clicks",
+		Value: "12000",
+	}
+
+	valueBytes, _ := json.Marshal(Value)
+	partitions[0].Write(valueBytes)
+
+	require.Eventually(t, func() bool {
+		for i := 1; i < 3; i++ {
+			got, err := partitions[i].Read(0, ReadConsistencyDefault)
+			if err != nil {
+				return false
+			}
+			if !reflect.DeepEqual(valueBytes, got) {
+				return false
+			}
+		}
+
 		return true
 
 	}, 500*time.Millisecond, 50*time.Millisecond)
 }
 
 func TestPartitionLeaderChange(t *testing.T) {
-	t.Skip("Implement leader change test")
+	partitions := make([]*Partition, 3)
+	for idx := range partitions {
+		var err error
+		partitions[idx], err = setupTestPartition(idx, DEFAULT_TOPIC_NAME)
+		defer teardownTestPartition(partitions[idx])
+		require.NoError(t, err)
+		if idx != 0 {
+			err = partitions[0].Join(fmt.Sprintf("%d", idx), string(partitions[idx].raftNet.LocalAddr()))
+			require.Nil(t, err)
+		}
+	}
+	servers, err := partitions[0].GetServers()
+	require.Nil(t, err)
+	require.Equal(t, 3, len(servers))
+
+	err = partitions[0].Leave(strconv.Itoa(0))
+	require.Nil(t, err)
+
+	var leaderIndex int
+
+	// Wait for the cluster to elect a new leader
+	require.Eventually(t, func() bool {
+		for i, p := range partitions {
+			if i != 0 && p.raftNode.State() == raft.Leader {
+				leaderIndex = i
+				return true
+			}
+		}
+		return false
+	}, 1*time.Second, 100*time.Millisecond, "Failed to elect a new leader after removing the old one")
+
+	servers, err = partitions[leaderIndex].GetServers()
+	require.Nil(t, err)
+	require.Equal(t, 2, len(servers))
+
+	require.Equal(t, raft.Leader, partitions[leaderIndex].raftNode.State())
 }
 
 func TestPartitionRecoveryAfterCrash(t *testing.T) {
-	t.Skip("Implement recovery after crash")
-}
+	// Setup initial partition
+	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
+	require.NoError(t, err)
+	defer os.RemoveAll(p.dataDir) // Clean up after test
 
+	// Write some data
+	testData := []byte("test message for crash recovery")
+	err = p.Write(testData)
+	require.NoError(t, err)
+
+	// Wait for the write to be applied
+	time.Sleep(500 * time.Millisecond)
+
+	config := p.config
+
+	// Simulate a crash by forcibly closing the partition
+	p.raftNode.Shutdown()
+	p.Close()
+
+	// Recreate the partition with the same configuration and data directory
+	newP, err := NewPartition(0, DEFAULT_TOPIC_NAME, config)
+	require.NoError(t, err)
+	defer newP.Close()
+
+	// Wait for the new partition to recover and elect a leader
+	_, err = newP.WaitForLeader(1 * time.Second)
+	require.NoError(t, err)
+
+	// Verify that the data is still there
+	require.Eventually(t, func() bool {
+		readData, err := newP.Read(0, ReadConsistencyStrong)
+		if err != nil {
+			return false
+		}
+		return reflect.DeepEqual(testData, readData)
+	}, 1*time.Second, 100*time.Millisecond, "Failed to recover data after crash")
+
+}
 func setupTestPartition(idx int, topicName string) (*Partition, error) {
 
 	config := Config{}
@@ -206,6 +359,7 @@ func setupTestPartition(idx int, topicName string) (*Partition, error) {
 	config.ElectionTimeout = 100 * time.Millisecond
 	config.LeaderLeaseTimeout = 100 * time.Millisecond
 	config.CommitTimeout = 5 * time.Millisecond
+	config.logConf.Segment.FlushWrite = true
 	if idx == 0 {
 		config.Bootstrap = true
 	}
@@ -217,7 +371,7 @@ func setupTestPartition(idx int, topicName string) (*Partition, error) {
 		return nil, err
 	}
 	if idx == 0 {
-		_, err = p.WaitForLeader(10 * time.Second)
+		_, err = p.WaitForLeader(5 * time.Second)
 	}
 	return p, err
 }

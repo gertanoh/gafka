@@ -18,21 +18,23 @@ const (
 // File store wrapper
 type store struct {
 	*os.File
-	mu   sync.Mutex
-	buf  *bufio.Writer
-	size uint64
+	mu           sync.Mutex
+	buf          *bufio.Writer
+	size         uint64
+	flushOnWrite bool
 }
 
-func newStore(f *os.File) (*store, error) {
+func newStore(f *os.File, flushWrite bool) (*store, error) {
 	fi, err := os.Stat(f.Name())
 	if err != nil {
 		return nil, err
 	}
 	size := uint64(fi.Size())
 	return &store{
-		File: f,
-		size: size,
-		buf:  bufio.NewWriter(f),
+		File:         f,
+		size:         size,
+		buf:          bufio.NewWriter(f),
+		flushOnWrite: flushWrite,
 	}, nil
 }
 
@@ -45,6 +47,11 @@ func (s *store) Append(p []byte) (n uint64, pos uint64, err error) {
 
 	if err := binary.Write(s.buf, Enc, uint64(len(p))); err != nil {
 		return 0, 0, err
+	}
+	if s.flushOnWrite {
+		if err := s.buf.Flush(); err != nil {
+			return 0, 0, err
+		}
 	}
 	w, err := s.buf.Write(p)
 	if err != nil {

@@ -104,6 +104,7 @@ func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	out.Index = index
 	out.Term = rec.Term
 	out.Type = raft.LogType(rec.RecordType)
+	// fmt.Printf("XXXXX Log : +%v\n", out.Index)
 	return nil
 }
 
@@ -231,11 +232,13 @@ func (p *Partition) setupRaft(dataDir string) error {
 		return err
 	}
 
+	p.logStore = logStore
 	stableStore, err := raftboltdb.NewBoltStore(filepath.Join(dataDir, "raft", "stable"))
 	if err != nil {
 		return err
 	}
 
+	p.stableStore = stableStore
 	snapshotStore, err := raft.NewFileSnapshotStore(filepath.Join(dataDir, "raft", "snapshot"), snapshotRetain, os.Stderr)
 	if err != nil {
 		return err
@@ -255,8 +258,8 @@ func (p *Partition) setupRaft(dataDir string) error {
 	p.raftNode, err = raft.NewRaft(
 		config,
 		fsm,
-		logStore,
-		stableStore,
+		p.logStore,
+		p.stableStore,
 		snapshotStore,
 		p.raftNet,
 	)

@@ -21,6 +21,7 @@ type Config struct {
 		MaxStoreBytes uint64
 		MaxIndexBytes uint64
 		InitialOffset uint64
+		FlushWrite    bool
 	}
 }
 
@@ -43,7 +44,7 @@ type originReader struct {
 // Log wrapper, equivalent to a partition
 func NewLog(dir string, c Config) (*Log, error) {
 	if c.Segment.MaxStoreBytes == 0 {
-		c.Segment.MaxStoreBytes = 1024
+		c.Segment.MaxStoreBytes = 1_048_576
 	}
 	if c.Segment.MaxIndexBytes == 0 {
 		c.Segment.MaxIndexBytes = 1024
