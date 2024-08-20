@@ -198,13 +198,6 @@ func (p *Partition) setupRaft(dataDir string) error {
 	config := raft.DefaultConfig()
 	config.LocalID = p.config.LocalID
 
-	// config.Logger = hclog.New(&hclog.LoggerOptions{
-	// 	Name:       "raft",
-	// 	Level:      hclog.Debug,
-	// 	Output:     os.Stderr,
-	// 	JSONFormat: true,
-	// })
-
 	// below constants are to speed up tests
 	if p.config.HeartbeatTimeout != 0 {
 		config.HeartbeatTimeout = p.config.HeartbeatTimeout
