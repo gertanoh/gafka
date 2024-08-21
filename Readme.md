@@ -4,9 +4,9 @@ It is for educational purposes, but who knows?
 
 
 # Expected Features / Progress of dev
-- [ ] Log
-- [ ] Partition / Topic / Replication
-- [ ] Partition connectivity / Raft Group
+- [x] Log
+- [x] Partition / Topic / Replication
+- [x] Partition connectivity / Raft Group
 - [ ] Broker / Cluster Raft Group
 - [ ] Broker GRPC Server
 - [ ] CLI for produce/consume
