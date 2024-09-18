@@ -57,6 +57,10 @@ The partition offers a configurable read consistency level.
 
 ### GRPC server / Protobuf
 
+Notes on grpc. 
+- built on top of HTTP.2
+- support streaming
+- improve performace
 
 ### CLI producers and  consumers
 topic is a logical grouping for client messages.

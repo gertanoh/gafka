@@ -5,7 +5,7 @@
 .PHONY: help
 help:
 	@echo 'Usage:'
-	@sed -n 's/^##//p' ${MAKEFILE_LIST} | column -t -s ':' | sed -e 's/^/ /'
+	@sed -n 's/^//p' ${MAKEFILE_LIST} | column -t -s ':' | sed -e 's/^/ /'
 
 .PHONY: confirm
 confirm:
@@ -13,6 +13,14 @@ confirm:
 
 
 ################### Dev ######################
+.PHONY: proto-compile
+proto-compile:
+	protoc proto/*.proto \
+		--go_out=. \
+		--go-grpc_out=. \
+		--go_opt=paths=source_relative \
+		--go-grpc_opt=paths=source_relative \
+		--proto_path=.
 
 
 

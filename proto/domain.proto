@@ -1,0 +1,56 @@
+// gafka.proto
+syntax = "proto3";
+
+package server;
+
+option go_package = "github.com/gertanoh/gafka/proto";
+
+
+service GafkaService {
+  rpc CreateTopic(CreateTopicRequest) returns (CreateTopicResponse) {}
+  rpc Write(WriteRequest) returns (WriteResponse) {}
+  rpc Read(ReadRequest) returns (ReadResponse) {}
+  rpc WriteStream(stream WriteRequest) returns (stream WriteResponse) {}
+  rpc ReadStream(ReadRequest) returns (stream ReadResponse) {}
+  rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse) {}
+}
+
+message CreateTopicRequest {
+  string topic_name = 1;
+  int32 num_partitions = 2;
+}
+
+message CreateTopicResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message WriteRequest {
+  string topic = 1;
+  int32 partition = 2;
+  bytes data = 3;
+}
+
+message WriteResponse {
+  bool success = 1;
+  string error = 2;
+  uint64 offset = 3;
+}
+
+message ReadRequest {
+  string topic = 1;
+  int32 partition = 2;
+  uint64 offset = 3;
+}
+
+message ReadResponse {
+  bool success = 1;
+  string error = 2;
+  bytes data = 3;
+}
+
+message ListTopicsRequest {}
+
+message ListTopicsResponse {
+  repeated string topics = 1;
+}
