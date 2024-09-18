@@ -27,14 +27,13 @@ message CreateTopicResponse {
 
 message WriteRequest {
   string topic = 1;
-  int32 partition = 2;
-  bytes data = 3;
+  string key = 2;
+  string payload = 3;
 }
 
 message WriteResponse {
   bool success = 1;
   string error = 2;
-  uint64 offset = 3;
 }
 
 message ReadRequest {
