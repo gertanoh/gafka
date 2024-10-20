@@ -26,7 +26,7 @@ proto-compile:
 
 ################### QA ######################
 .PHONY: audit
-audit:
+audit: proto-compile
 	@echo 'Formatting code...'
 	go fmt ./...
 	@echo 'Vetting code...'

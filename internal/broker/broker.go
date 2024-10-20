@@ -9,6 +9,7 @@ import (
 
 	"hash/fnv"
 
+	"github.com/gertanoh/gafka/internal/discovery"
 	"github.com/gertanoh/gafka/internal/partition"
 	"github.com/gertanoh/gafka/proto"
 	"go.uber.org/zap"
@@ -20,12 +21,24 @@ type Broker struct {
 	mu         sync.RWMutex
 	topics     map[string][]*partition.Partition
 	grpcServer *grpc.Server
+	membership *discovery.Membership
+	nodeID     string
 }
 
-func NewBroker() *Broker {
-	return &Broker{
+func NewBroker(nodeID string, memberConf discovery.Config) (*Broker, error) {
+	b := &Broker{
 		topics: make(map[string][]*partition.Partition),
+		nodeID: nodeID,
 	}
+
+	membership, err := discovery.New(b, memberConf)
+	if err != nil {
+		zap.S().Error("failed to create membership for broker", zap.Error(err))
+		return nil, err
+	}
+
+	b.membership = membership
+	return b, nil
 }
 
 func (b *Broker) Start(address string) error {
@@ -153,4 +166,20 @@ func hash(s string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(s))
 	return h.Sum32()
+}
+
+func (b *Broker) Join(name, addr string) error {
+	return nil
+}
+
+func (b *Broker) Leave(name string) error {
+	return nil
+}
+
+func (b *Broker) GetTopicData(topicName string) (discovery.TopicData, bool) {
+	return discovery.TopicData{}, true
+}
+
+func (b *Broker) UpdateTopicData(topicName string, data discovery.TopicData) {
+
 }

@@ -1,7 +1,9 @@
 package discovery
 
 import (
+	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +31,7 @@ func TestMembership(t *testing.T) {
 			len(handler.leaves) == 1
 	}, 3*time.Second, 250*time.Millisecond)
 
-	m, _ = setupMember(t, m)
+	m, h4 := setupMember(t, m)
 	require.Eventually(t, func() bool {
 		return len(handler.joins) == 3 &&
 			len(m[0].Members()) == 4 &&
@@ -37,6 +39,55 @@ func TestMembership(t *testing.T) {
 	}, 3*time.Second, 250*time.Millisecond)
 
 	require.Equal(t, fmt.Sprintf("%d", 2), <-handler.leaves)
+
+	// Test topic creation and query
+	topicName := "test-topic"
+	topicData := TopicData{
+		Partitions: map[int]string{
+			0: "leader-1",
+			1: "leader-2",
+		},
+	}
+
+	// Broadcast topic creation
+	payload, err := json.Marshal(struct {
+		Name string
+		Data TopicData
+	}{
+		Name: topicName,
+		Data: topicData,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m[0].serf.UserEvent("topic_created", payload, true))
+
+	// Wait for the event to be processed
+	time.Sleep(1 * time.Second)
+
+	// Verify that the topic data was updated in the handler
+	require.Eventually(t, func() bool {
+		h4.mu.Lock()
+		defer h4.mu.Unlock()
+		data, exists := h4.topicData[topicName]
+		return exists && len(data.Partitions) == 2
+	}, 1*time.Second, 250*time.Millisecond)
+
+	// Test query for topic leader
+	queryPayload, err := json.Marshal(topicName)
+	require.NoError(t, err)
+
+	resp, err := m[1].serf.Query("get_topic_leader", queryPayload, &serf.QueryParam{
+		Timeout: 1 * time.Second,
+	})
+	require.NoError(t, err)
+
+	var receivedTopicData TopicData
+	for r := range resp.ResponseCh() {
+		err = json.Unmarshal(r.Payload, &receivedTopicData)
+		require.NoError(t, err)
+		break
+	}
+
+	require.Equal(t, topicData, receivedTopicData)
 }
 
 func setupMember(t *testing.T, members []*Membership) ([]*Membership,
@@ -46,7 +97,7 @@ func setupMember(t *testing.T, members []*Membership) ([]*Membership,
 	port := dynaport.Get(1)
 	addr := fmt.Sprintf("%s:%d", "127.0.0.1", port[0])
 	tags := map[string]string{
-		"grpc_addr": addr,
+		"rpc_addr": addr,
 	}
 
 	c := Config{
@@ -64,6 +115,8 @@ func setupMember(t *testing.T, members []*Membership) ([]*Membership,
 			members[0].BindAddr,
 		}
 	}
+	h.topicData = make(map[string]TopicData)
+	h.nodeName = fmt.Sprintf("%d", id)
 	m, err := New(h, c)
 	require.NoError(t, err)
 	members = append(members, m)
@@ -71,8 +124,11 @@ func setupMember(t *testing.T, members []*Membership) ([]*Membership,
 }
 
 type handler struct {
-	joins  chan map[string]string
-	leaves chan string
+	joins     chan map[string]string
+	leaves    chan string
+	topicData map[string]TopicData
+	mu        sync.RWMutex
+	nodeName  string
 }
 
 func (h *handler) Join(id, addr string) error {
@@ -90,4 +146,17 @@ func (h *handler) Leave(id string) error {
 		h.leaves <- id
 	}
 	return nil
+}
+
+func (h *handler) UpdateTopicData(topicName string, data TopicData) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.topicData[topicName] = data
+}
+
+func (h *handler) GetTopicData(topicName string) (TopicData, bool) {
+	h.mu.RLock()
+	defer h.mu.RLock()
+	data, exists := h.topicData[topicName]
+	return data, exists
 }
