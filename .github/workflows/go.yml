@@ -20,7 +20,7 @@ jobs:
 
     - name: Install Protoc
       run: |
-        apt install -y protobuf-compiler
+        sudo apt install -y protobuf-compiler
         protoc --version
 
     - name: Install Protoc-gen-go
