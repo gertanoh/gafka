@@ -58,7 +58,7 @@ func TestMembership(t *testing.T) {
 		Data: topicData,
 	})
 	require.NoError(t, err)
-	require.NoError(t, m[0].serf.UserEvent("topic_created", payload, true))
+	require.NoError(t, m[0].Serf.UserEvent("topic_created", payload, true))
 
 	// Wait for the event to be processed
 	time.Sleep(1 * time.Second)
@@ -75,7 +75,7 @@ func TestMembership(t *testing.T) {
 	queryPayload, err := json.Marshal(topicName)
 	require.NoError(t, err)
 
-	resp, err := m[1].serf.Query("get_topic_leader", queryPayload, &serf.QueryParam{
+	resp, err := m[1].Serf.Query("get_topic_leader", queryPayload, &serf.QueryParam{
 		Timeout: 1 * time.Second,
 	})
 	require.NoError(t, err)

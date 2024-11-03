@@ -26,7 +26,7 @@ type TopicData struct {
 type Membership struct {
 	Config
 	handler Handler
-	serf    *serf.Serf
+	Serf    *serf.Serf
 	events  chan serf.Event
 	done    chan struct{}
 	logger  *zap.SugaredLogger
@@ -70,7 +70,7 @@ func (m *Membership) setupSerf() error {
 	config.Tags = m.Tags
 	config.NodeName = m.Config.NodeName
 
-	m.serf, err = serf.Create(config)
+	m.Serf, err = serf.Create(config)
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func (m *Membership) setupSerf() error {
 	go m.eventHandler()
 
 	if m.StartJoinAddrs != nil {
-		_, err = m.serf.Join(m.StartJoinAddrs, true) // TODO do a retry here
+		_, err = m.Serf.Join(m.StartJoinAddrs, true) // TODO do a retry here
 		if err != nil {
 			return err
 		}
@@ -139,16 +139,16 @@ func (m *Membership) handleLeave(member serf.Member) {
 }
 
 func (m *Membership) isLocal(member serf.Member) bool {
-	return m.serf.LocalMember().Name == member.Name
+	return m.Serf.LocalMember().Name == member.Name
 }
 
 func (m *Membership) Members() []serf.Member {
-	return m.serf.Members()
+	return m.Serf.Members()
 }
 
 func (m *Membership) Leave() error {
 	close(m.done)
-	if err := m.serf.Leave(); err != nil {
+	if err := m.Serf.Leave(); err != nil {
 		return err
 	}
 	m.wg.Wait()

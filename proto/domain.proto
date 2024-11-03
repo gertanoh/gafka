@@ -13,16 +13,29 @@ service GafkaService {
   rpc WriteStream(stream WriteRequest) returns (stream WriteResponse) {}
   rpc ReadStream(ReadRequest) returns (stream ReadResponse) {}
   rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse) {}
+  rpc CreatePartition(PartitionRequest) returns (PartitionResponse) {}
+}
+
+message PartitionRequest {
+  string topic_name = 1;
+  int32 partition_id = 2;
+  bool is_leader = 3;
+  string leader_addr = 4;
+}
+
+message PartitionResponse {
+  string bind_addr = 1;
+  string error = 2;
 }
 
 message CreateTopicRequest {
   string topic_name = 1;
   int32 num_partitions = 2;
+  int32 replica_factor = 3;
 }
 
 message CreateTopicResponse {
-  bool success = 1;
-  string error = 2;
+  string error = 1;
 }
 
 message WriteRequest {

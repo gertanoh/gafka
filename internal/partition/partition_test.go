@@ -316,7 +316,7 @@ func TestPartitionRecoveryAfterCrash(t *testing.T) {
 	// Setup initial partition
 	p, err := setupTestPartition(0, DEFAULT_TOPIC_NAME)
 	require.NoError(t, err)
-	defer os.RemoveAll(p.dataDir) // Clean up after test
+	defer os.RemoveAll(p.dataDir)
 
 	// Write some data
 	testData := []byte("test message for crash recovery")
@@ -328,20 +328,16 @@ func TestPartitionRecoveryAfterCrash(t *testing.T) {
 
 	config := p.config
 
-	// Simulate a crash by forcibly closing the partition
 	p.raftNode.Shutdown()
 	p.Close()
 
-	// Recreate the partition with the same configuration and data directory
 	newP, err := NewPartition(0, DEFAULT_TOPIC_NAME, config)
 	require.NoError(t, err)
 	defer newP.Close()
 
-	// Wait for the new partition to recover and elect a leader
 	_, err = newP.WaitForLeader(1 * time.Second)
 	require.NoError(t, err)
 
-	// Verify that the data is still there
 	require.Eventually(t, func() bool {
 		readData, err := newP.Read(0, ReadConsistencyStrong)
 		if err != nil {
