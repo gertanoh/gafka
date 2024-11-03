@@ -222,6 +222,26 @@ func (p *Partition) Close() error {
 	return nil
 }
 
+func (p *Partition) Remove() error {
+	future := p.raftNode.Shutdown()
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	if p.stableStore != nil {
+		p.stableStore.Close()
+	}
+	if p.logStore != nil {
+		p.logStore.log.Close()
+	}
+	if err := p.raftNet.Close(); err != nil {
+		return err
+	}
+	p.log.Remove()
+
+	return nil
+}
+
 func (p *Partition) WaitForLeader(timeout time.Duration) (string, error) {
 	var err error
 	var leaderAddr string

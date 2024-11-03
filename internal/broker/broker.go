@@ -27,28 +27,27 @@ const (
 
 type Broker struct {
 	proto.UnimplementedGafkaServiceServer
-	topicsMu   sync.RWMutex
-	topics     map[string]*partition.Partition
-	grpcServer *grpc.Server
-	membership *discovery.Membership
-	nodeName   string
-	nodeIP string
+	topicsMu    sync.RWMutex
+	topics      map[string][]*partition.Partition // topics to list of partitions handled by current broker
+	grpcServer  *grpc.Server
+	membership  *discovery.Membership
+	nodeName    string
+	nodeIP      string
 	topicDataMu sync.RWMutex
 	topicData   map[string]discovery.TopicData // topic name to metadata
 }
 
-type parititionCreation struct {
-	partitions []*partition.Partition
-	currentIdx int
+type partitionCreation struct {
+	partitions map[string][]*partition.Partition // topic to list of partitions
 	success    bool
 	topicData  discovery.TopicData
 }
 
-func NewBroker(nodeName string, nodeIP string,  memberConf discovery.Config) (*Broker, error) {
+func NewBroker(nodeName string, nodeIP string, memberConf discovery.Config) (*Broker, error) {
 	b := &Broker{
-		topics:    make(map[string]*partition.Partition),
+		topics:    make(map[string][]*partition.Partition),
 		nodeName:  nodeName,
-		nodeIP: nodeIP,
+		nodeIP:    nodeIP,
 		topicData: make(map[string]discovery.TopicData),
 	}
 
@@ -169,6 +168,9 @@ func (b *Broker) Stop(ctx context.Context) error {
 
 func (b *Broker) CreatePartition(ctx context.Context, req *proto.PartitionRequest) (*proto.PartitionResponse, error) {
 
+	b.topicsMu.Lock()
+	defer b.topicsMu.Unlock()
+
 	port := dynaport.Get(1)
 	addr := fmt.Sprintf("%s:%d", b.nodeIP, port[0])
 
@@ -183,17 +185,31 @@ func (b *Broker) CreatePartition(ctx context.Context, req *proto.PartitionReques
 	p, err := partition.NewPartition(int(req.PartitionId), req.TopicName, config)
 	if err != nil {
 		return &proto.PartitionResponse{
-			Success: false,
-			Error:   fmt.Sprintf("failed to create partition: %v", err),
+			Error: fmt.Sprintf("failed to create partition: %v", err),
 		}, nil
 	}
 
-	if !req.IsLeader {
-		 
+	if req.IsLeader {
+		// join followers to raft cluster
+		for node, nodeAddr := range req.FollowerAddrs {
+			if err := p.Join(node, nodeAddr); err != nil {
+				return &proto.PartitionResponse{
+					Error: fmt.Sprintf("failed to join followers to raft cluster due to : %v. Data is %+v", err, req.FollowerAddrs),
+				}, nil
+			}
+		}
 	}
-	b.topicsMu.Lock()
-	defer b.topicsMu.Unlock()
-	b.topics[req.TopicName] = p
+	// Initialize partition slice if it doesn't exist
+	if b.topics[req.TopicName] == nil {
+		b.topics[req.TopicName] = make([]*partition.Partition, req.PartitionId+1)
+	}
+	// Ensure slice has enough capacity
+	if int(req.PartitionId) >= len(b.topics[req.TopicName]) {
+		newPartitions := make([]*partition.Partition, req.PartitionId+1)
+		copy(newPartitions, b.topics[req.TopicName])
+		b.topics[req.TopicName] = newPartitions
+	}
+	b.topics[req.TopicName][req.PartitionId] = p
 
 	return &proto.PartitionResponse{BindAddr: addr}, nil
 }
@@ -211,23 +227,29 @@ func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest)
 	b.topicsMu.Lock()
 	defer b.topicsMu.Unlock()
 
-	if _, exists := b.topics[req.TopicName]; exists {
-		return &proto.CreateTopicResponse{Success: true}, fmt.Errorf("topic already exists")
+	if _, exists := b.topics[req.TopicName]; exists { // TODO shall send a query
+		return &proto.CreateTopicResponse{}, fmt.Errorf("topic already exists")
 	}
 
 	members := b.membership.Members()
 	nbMem := len(members)
 
 	if nbMem < int(req.NumPartitions) {
-		return &proto.CreateTopicResponse{Success: false},
+		return &proto.CreateTopicResponse{},
 			fmt.Errorf("not enough brokers available. Need %d, have %d", req.NumPartitions, nbMem)
 	}
 
-	pc := &parititionCreation{
-		partitions: make([]*partition.Partition, req.NumPartitions),
+	// Handle graceful delete of all partitions created by current broker if an error happens
+	pc := &partitionCreation{
+		partitions: make(map[string][]*partition.Partition, req.NumPartitions),
+		success:    false,
+		topicData: discovery.TopicData{
+			Partitions: make(map[int]string),
+		},
 	}
-
 	defer pc.cleanup()
+
+	b.topics[req.TopicName] = make([]*partition.Partition, req.NumPartitions)
 
 	// For each partition, setup raft and assign replicas
 	for i := 0; i < int(req.NumPartitions); i++ {
@@ -235,117 +257,131 @@ func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest)
 		// start index is randomized
 		startBroker := rand.IntN(nbMem)
 		startIndex := (startBroker + i) % nbMem
-		pc.currentIdx = i
 
-		var partitionLeaderAddr string
+		followerAddrs := make(map[string]string) // nodeName => bindAddr
 
-		// create all replicas
-		for r := range int(req.ReplicaFactor) {
+		// create followers first and then collect the addresses
+		for r := 1; r < int(req.ReplicaFactor); r++ {
 			memberIndex := (startIndex + r) % nbMem
 			member := members[memberIndex]
 			rpcAddr := member.Tags["rpc_addr"]
 			nodeName := member.Tags["node_name"]
-			isLeader := r == 0
 
+			var bindAddr string
 			if nodeName == b.nodeName {
 				partHost, _, err := net.SplitHostPort(rpcAddr)
 				port := dynaport.Get(1)
-				addr := fmt.Sprintf("%s:%d", partHost, port[0])
+				bindAddr = fmt.Sprintf("%s:%d", partHost, port[0])
+
 				// local call
 				config := partition.Config{
-                    Config: raft.Config{
-                        LocalID: raft.ServerID(b.nodeName),
-                    },
-                    BindAddr:  addr,
-                    Bootstrap: isLeader,
-                }
-
-                p, err := partition.NewPartition(i, req.TopicName, config)
-                if err != nil {
-                    return &proto.CreateTopicResponse{Success: false}, 
-                        fmt.Errorf("failed to create partition %d: %v", i, err)
-                }
-				if isLeader {
-					pc.partitions[i] = p
-					pc.topicData.Partitions[i] = addr
-					partitionLeaderAddr = addr
+					Config: raft.Config{
+						LocalID: raft.ServerID(b.nodeName),
+					},
+					BindAddr:  bindAddr,
+					Bootstrap: false,
 				}
+
+				p, err := partition.NewPartition(i, req.TopicName, config)
+				if err != nil {
+					return &proto.CreateTopicResponse{},
+						fmt.Errorf("failed to create partition %d: %v", i, err)
+				}
+				pc.partitions[req.TopicName][i] = p
 			} else {
 				conn, err := grpc.NewClient(rpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 				if err != nil {
-					return fmt.Errorf("failed to connect to broker: %v", err)
+					return &proto.CreateTopicResponse{}, fmt.Errorf("failed to connect to broker: %v", err)
 				}
-	
+
 				client := proto.NewGafkaServiceClient(conn)
 				partReq := &proto.PartitionRequest{
 					TopicName:   req.TopicName,
 					PartitionId: int32(i),
-					IsLeader:    isLeader,
-					BindAddr:    rpcAddr,
+					IsLeader:    false,
 				}
 				defer conn.Close()
 
 				resp, err := client.CreatePartition(ctx, partReq)
-				if err != nil || !resp.Success {
-					return fmt.Errorf("failed to create partition: %v, %s", err, resp.Error)
+				if err != nil || resp.Error != "" {
+					return &proto.CreateTopicResponse{}, fmt.Errorf("failed to create partition: %v, %s", err, resp.Error)
 				}
-				if isLeader {
-					partitionLeaderAddr = resp.BindAddr
-				}
+				bindAddr = resp.BindAddr
+			}
+			followerAddrs[nodeName] = bindAddr
+
+		}
+
+		// create partition leader
+		leaderMember := members[startIndex]
+		leaderName := leaderMember.Tags["node_name"]
+		leaderRPC := leaderMember.Tags["rpc_addr"]
+
+		if leaderName == b.nodeName {
+
+			port := dynaport.Get(1)
+			leaderAddr := fmt.Sprintf("%s:%d", b.nodeIP, port[0])
+
+			config := partition.Config{
+				Config: raft.Config{
+					LocalID: raft.ServerID(b.nodeName),
+				},
+				BindAddr:  leaderAddr,
+				Bootstrap: true,
 			}
 
-			// join raft cluster
-			if !isLeader && pc.partitions[i] != nil {
-				if err := pc.partitions[i].Join()
+			p, err := partition.NewPartition(i, req.TopicName, config)
+			if err != nil {
+				return &proto.CreateTopicResponse{},
+					fmt.Errorf("failed to create leader partition %d: %v", i, err)
 			}
 
-			if !isLeader && pc.partitions
-
-		}
-
-		port := dynaport.Get(1)
-		addr := fmt.Sprintf("%s:%d", partHost, port[0])
-
-		config := partition.Config{
-			Config: raft.Config{
-				LocalID: raft.ServerID(b.nodeName),
-			},
-			BindAddr:  addr,
-			Bootstrap: true,
-		}
-
-		p, err := partition.NewPartition(i, req.TopicName, config)
-		if err != nil {
-			return &proto.CreateTopicResponse{Success: false}, fmt.Errorf("failed to create partition %d: %v", i, err)
-
-		}
-
-		// add replicas
-		for r := range int(req.ReplicaFactor) {
-			memberIndex := (startIndex + r) % nbMem
-			member := members[memberIndex]
-			if err := p.Join(member.Name, member.Tags["rpc_addr"]); err != nil {
+			// Wait for leader election
+			_, err = p.WaitForLeader(LeaderElectionWait)
+			if err != nil {
+				// Cleanup on error
 				p.Close()
-				return &proto.CreateTopicResponse{Success: false},
-					fmt.Errorf("failed to add replica for partition %d: %v", i, err)
+				return &proto.CreateTopicResponse{},
+					fmt.Errorf("failed to elect leader for partition %d: %v", i, err)
 			}
-		}
+			// Join followers
+			for nodeName, addr := range followerAddrs {
+				if err := p.Join(nodeName, addr); err != nil {
+					return &proto.CreateTopicResponse{},
+						fmt.Errorf("failed to add replica for partition %d: %v", i, err)
+				}
+			}
 
-		// Wait for leader election
-		leaderAddr, err := p.WaitForLeader(LeaderElectionWait)
-		if err != nil {
-			// Cleanup on error
-			p.Close()
-			return &proto.CreateTopicResponse{Success: false},
-				fmt.Errorf("failed to elect leader for partition %d: %v", i, err)
-		}
+			pc.partitions[req.TopicName][i] = p
+			pc.topicData.Partitions[i] = leaderAddr
 
-		pc.partitions[i] = p
-		pc.topicData.Partitions[i] = leaderAddr
+		} else {
+			// remote leader for partitions
+			conn, err := grpc.NewClient(leaderRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				return &proto.CreateTopicResponse{},
+					fmt.Errorf("failed to connect to leader broker: %v", err)
+			}
+			defer conn.Close()
+
+			client := proto.NewGafkaServiceClient(conn)
+			partReq := &proto.PartitionRequest{
+				TopicName:     req.TopicName,
+				PartitionId:   int32(i),
+				IsLeader:      true,
+				FollowerAddrs: followerAddrs,
+			}
+
+			resp, err := client.CreatePartition(ctx, partReq)
+			if err != nil || resp.Error != "" {
+				return &proto.CreateTopicResponse{},
+					fmt.Errorf("failed to create leader partition: %v, %s", err, resp.Error)
+			}
+			pc.topicData.Partitions[i] = resp.BindAddr
+		}
 	}
 
-	b.topics[req.TopicName] = pc.partitions
-
+	b.topics[req.TopicName] = pc.partitions[req.TopicName]
 	// broadcast topic creation to others brokers with serf
 	topicEvent := struct {
 		Name string
@@ -357,16 +393,16 @@ func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest)
 
 	eventPayload, err := json.Marshal(topicEvent)
 	if err != nil {
-		return &proto.CreateTopicResponse{Success: false},
+		return &proto.CreateTopicResponse{},
 			fmt.Errorf("failed to marshal topic event: %v", err)
 	}
 
 	if err := b.membership.Serf.UserEvent("topic_created", eventPayload, true); err != nil {
-		return &proto.CreateTopicResponse{Success: false},
+		return &proto.CreateTopicResponse{},
 			fmt.Errorf("failed to broadcast topic creation: %v", err)
 	}
 	pc.success = true
-	return &proto.CreateTopicResponse{Success: true}, nil
+	return &proto.CreateTopicResponse{}, nil
 }
 
 // Routing is done at the networking layer
@@ -499,14 +535,16 @@ func (b *Broker) UpdateTopicData(topicName string, data discovery.TopicData) {
 		"metadata", data)
 }
 
-func (pc *parititionCreation) cleanup() {
+func (pc *partitionCreation) cleanup() {
 	if pc.success {
 		return
 	}
 
-	for i := range pc.currentIdx {
-		if pc.partitions[i] != nil {
-			pc.partitions[i].Close()
+	for _, partitions := range pc.partitions {
+		for _, partition := range partitions {
+			if partition != nil {
+				partition.Remove()
+			}
 		}
 	}
 }

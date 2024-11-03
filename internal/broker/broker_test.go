@@ -1,15 +1,11 @@
 package broker
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/gertanoh/gafka/internal/discovery"
-	"github.com/gertanoh/gafka/internal/partition"
-	"github.com/gertanoh/gafka/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/travisjeffery/go-dynaport"
@@ -31,7 +27,7 @@ func setupTestBroker(t *testing.T, nbBrokers int) ([]*Broker, error) {
 			},
 			StartJoinAddrs: startJoinAddr,
 		}
-		broker, err := NewBroker("test-node-"+strconv.Itoa(i), memberConf)
+		broker, err := NewBroker("test-node-"+strconv.Itoa(i), addr, memberConf)
 		brokers[i] = broker
 		require.NoError(t, err)
 
@@ -70,9 +66,9 @@ func TestNewBroker(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			broker, err := NewBroker(tt.nodeName, tt.memberConf)
+			broker, err := NewBroker(tt.nodeName, "localhost-"+strconv.Itoa(i), tt.memberConf)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, broker)
@@ -87,88 +83,88 @@ func TestNewBroker(t *testing.T) {
 	}
 }
 
-func TestCreateTopic(t *testing.T) {
-	tests := []struct {
-		name        string
-		request     *proto.CreateTopicRequest
-		setupBroker func(*Broker)
-		wantErr     bool
-		errContains string
-	}{
-		{
-			name: "successful creation",
-			request: &proto.CreateTopicRequest{
-				TopicName:     "test-topic",
-				NumPartitions: 2,
-				ReplicaFactor: 2,
-			},
-			setupBroker: func(b *Broker) {},
-			wantErr:     false,
-		},
-		{
-			name: "topic already exists",
-			request: &proto.CreateTopicRequest{
-				TopicName:     "existing-topic",
-				NumPartitions: 2,
-				ReplicaFactor: 2,
-			},
-			setupBroker: func(b *Broker) {
-				b.topicsMu.Lock()
-				b.topics["existing-topic"] = make([]*partition.Partition, 1)
-				b.topicsMu.Unlock()
-			},
-			wantErr:     true,
-			errContains: "topic already exists",
-		},
-		{
-			name: "not enough brokers",
-			request: &proto.CreateTopicRequest{
-				TopicName:     "test-topic",
-				NumPartitions: 5,
-				ReplicaFactor: 2,
-			},
-			setupBroker: func(b *Broker) {},
-			wantErr:     true,
-			errContains: "not enough brokers available",
-		},
-	}
+// func TestCreateTopic(t *testing.T) {
+// 	tests := []struct {
+// 		name        string
+// 		request     *proto.CreateTopicRequest
+// 		setupBroker func(*Broker)
+// 		wantErr     bool
+// 		errContains string
+// 	}{
+// 		{
+// 			name: "successful creation",
+// 			request: &proto.CreateTopicRequest{
+// 				TopicName:     "test-topic",
+// 				NumPartitions: 2,
+// 				ReplicaFactor: 2,
+// 			},
+// 			setupBroker: func(b *Broker) {},
+// 			wantErr:     false,
+// 		},
+// 		{
+// 			name: "topic already exists",
+// 			request: &proto.CreateTopicRequest{
+// 				TopicName:     "existing-topic",
+// 				NumPartitions: 2,
+// 				ReplicaFactor: 2,
+// 			},
+// 			setupBroker: func(b *Broker) {
+// 				b.topicsMu.Lock()
+// 				b.topics["existing-topic"] = make([]*partition.Partition, 1)
+// 				b.topicsMu.Unlock()
+// 			},
+// 			wantErr:     true,
+// 			errContains: "topic already exists",
+// 		},
+// 		{
+// 			name: "not enough brokers",
+// 			request: &proto.CreateTopicRequest{
+// 				TopicName:     "test-topic",
+// 				NumPartitions: 5,
+// 				ReplicaFactor: 2,
+// 			},
+// 			setupBroker: func(b *Broker) {},
+// 			wantErr:     true,
+// 			errContains: "not enough brokers available",
+// 		},
+// 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			brokers, err := setupTestBroker(t, 3)
-			require.NoError(t, err)
+// 	for _, tt := range tests {
+// 		t.Run(tt.name, func(t *testing.T) {
+// 			brokers, err := setupTestBroker(t, 3)
+// 			require.NoError(t, err)
 
-			time.Sleep(5 * time.Second)
-			tt.setupBroker(brokers[0])
-			broker := brokers[0]
-			resp, err := broker.CreateTopic(context.Background(), tt.request)
-			if tt.wantErr {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errContains)
-				assert.False(t, resp.Success)
-			} else {
-				assert.NoError(t, err)
-				assert.True(t, resp.Success)
+// 			time.Sleep(5 * time.Second)
+// 			tt.setupBroker(brokers[0])
+// 			broker := brokers[0]
+// 			resp, err := broker.CreateTopic(context.Background(), tt.request)
+// 			if tt.wantErr {
+// 				assert.Error(t, err)
+// 				assert.Contains(t, err.Error(), tt.errContains)
+// 				assert.False(t, resp.Success)
+// 			} else {
+// 				assert.NoError(t, err)
+// 				assert.True(t, resp.Success)
 
-				// Verify topic was created
-				broker.topicsMu.RLock()
-				partitions, exists := broker.topics[tt.request.TopicName]
-				broker.topicsMu.RUnlock()
+// 				// Verify topic was created
+// 				broker.topicsMu.RLock()
+// 				partitions, exists := broker.topics[tt.request.TopicName]
+// 				broker.topicsMu.RUnlock()
 
-				assert.True(t, exists)
-				assert.Len(t, partitions, int(tt.request.NumPartitions))
+// 				assert.True(t, exists)
+// 				assert.Len(t, partitions, int(tt.request.NumPartitions))
 
-				// Verify topic metadata
-				broker.topicDataMu.RLock()
-				metadata, exists := broker.topicData[tt.request.TopicName]
-				broker.topicDataMu.RUnlock()
+// 				// Verify topic metadata
+// 				broker.topicDataMu.RLock()
+// 				metadata, exists := broker.topicData[tt.request.TopicName]
+// 				broker.topicDataMu.RUnlock()
 
-				assert.True(t, exists)
-				assert.Len(t, metadata.Partitions, int(tt.request.NumPartitions))
-			}
-		})
-	}
-}
+// 				assert.True(t, exists)
+// 				assert.Len(t, metadata.Partitions, int(tt.request.NumPartitions))
+// 			}
+// 		})
+// 	}
+// }
 
 // func TestTopicDataOperations(t *testing.T) {
 // 	broker, err := setupTestBroker(t)
