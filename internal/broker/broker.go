@@ -20,7 +20,6 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/reflection"
 )
 
 const (
@@ -76,7 +75,6 @@ func (b *Broker) Start(address string) error {
 
 	b.grpcServer = grpc.NewServer()
 	proto.RegisterGafkaServiceServer(b.grpcServer, b)
-	reflection.Register(b.grpcServer)
 
 	zap.S().Infof("Starting gRPC server on %s", address)
 	go func() {
@@ -342,13 +340,14 @@ func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest)
 
 	// Handle graceful delete of all partitions created by current broker if an error happens
 	pc := &partitionCreation{
-		partitions: make(map[string][]*partition.Partition, req.NumPartitions),
+		partitions: make(map[string][]*partition.Partition),
 		success:    false,
 		topicData: discovery.TopicData{
 			Partitions: make(map[int]string),
 		},
 		broker: b,
 	}
+	pc.partitions[req.TopicName] = make([]*partition.Partition, req.NumPartitions)
 	defer pc.cleanup()
 
 	// For each partition, setup raft and assign replicas
@@ -530,8 +529,8 @@ func (b *Broker) GetTopicData(topicName string) (discovery.TopicData, bool) {
 
 // called when receiving metadata update for a topic
 func (b *Broker) UpdateTopicData(topicName string, data discovery.TopicData) {
-	b.topicDataMu.RLock()
-	defer b.topicDataMu.RUnlock()
+	b.topicDataMu.Lock()
+	defer b.topicDataMu.Unlock()
 
 	topicData, exists := b.topicData[topicName]
 	if exists {

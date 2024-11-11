@@ -38,7 +38,7 @@ audit: proto-compile
 .PHONY: test
 test: proto-compile
 	@echo 'Running tests'
-	GODEBUG=gctrace=1 go test -race -vet=off ./...  -timeout 10s
+	go test -race -vet=off ./...  -timeout 30s
 ## tidy and verify dependencies
 .PHONY: tidy
 vendor:
