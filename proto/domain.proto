@@ -20,7 +20,8 @@ message PartitionRequest {
   string topic_name = 1;
   int32 partition_id = 2;
   bool is_leader = 3;
-  map<string, string> follower_addrs = 4;  // nodeName => bindAddr
+  int32 num_partitions = 4;
+  map<string, string> follower_addrs = 5;  // nodeName => bindAddr
 }
 
 message PartitionResponse {

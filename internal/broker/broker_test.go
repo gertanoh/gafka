@@ -1,9 +1,11 @@
 package broker
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/gertanoh/gafka/internal/discovery"
 	"github.com/stretchr/testify/assert"
@@ -27,13 +29,24 @@ func setupTestBroker(t *testing.T, nbBrokers int) ([]*Broker, error) {
 			},
 			StartJoinAddrs: startJoinAddr,
 		}
-		broker, err := NewBroker("test-node-"+strconv.Itoa(i), addr, memberConf)
+		broker, err := NewBroker("test-node-"+strconv.Itoa(i), "127.0.0.1", uint16(port[0]), memberConf)
+		broker.Start(addr)
 		brokers[i] = broker
 		require.NoError(t, err)
 
 	}
 
 	return brokers, nil
+}
+
+func cleanupBrokers(t *testing.T, brokers []*Broker) {
+	for _, broker := range brokers {
+		if broker != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, broker.Stop(ctx))
+		}
+	}
 }
 
 func TestNewBroker(t *testing.T) {
@@ -68,7 +81,7 @@ func TestNewBroker(t *testing.T) {
 
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			broker, err := NewBroker(tt.nodeName, "localhost-"+strconv.Itoa(i), tt.memberConf)
+			broker, err := NewBroker(tt.nodeName, "localhost-"+strconv.Itoa(i), 45665, tt.memberConf)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, broker)
@@ -82,6 +95,12 @@ func TestNewBroker(t *testing.T) {
 		})
 	}
 }
+
+// func dumpGoroutines() {
+// 	buf := make([]byte, 1<<16)
+// 	runtime.Stack(buf, true)
+// 	zap.S().Info(string(buf))
+// }
 
 // func TestCreateTopic(t *testing.T) {
 // 	tests := []struct {
@@ -101,50 +120,55 @@ func TestNewBroker(t *testing.T) {
 // 			setupBroker: func(b *Broker) {},
 // 			wantErr:     false,
 // 		},
-// 		{
-// 			name: "topic already exists",
-// 			request: &proto.CreateTopicRequest{
-// 				TopicName:     "existing-topic",
-// 				NumPartitions: 2,
-// 				ReplicaFactor: 2,
-// 			},
-// 			setupBroker: func(b *Broker) {
-// 				b.topicsMu.Lock()
-// 				b.topics["existing-topic"] = make([]*partition.Partition, 1)
-// 				b.topicsMu.Unlock()
-// 			},
-// 			wantErr:     true,
-// 			errContains: "topic already exists",
-// 		},
-// 		{
-// 			name: "not enough brokers",
-// 			request: &proto.CreateTopicRequest{
-// 				TopicName:     "test-topic",
-// 				NumPartitions: 5,
-// 				ReplicaFactor: 2,
-// 			},
-// 			setupBroker: func(b *Broker) {},
-// 			wantErr:     true,
-// 			errContains: "not enough brokers available",
-// 		},
+// 		// {
+// 		// 	name: "topic already exists",
+// 		// 	request: &proto.CreateTopicRequest{
+// 		// 		TopicName:     "existing-topic",
+// 		// 		NumPartitions: 2,
+// 		// 		ReplicaFactor: 2,
+// 		// 	},
+// 		// 	setupBroker: func(b *Broker) {
+// 		// 		b.topicsMu.Lock()
+// 		// 		b.topics["existing-topic"] = make([]*partition.Partition, 1)
+// 		// 		b.topicsMu.Unlock()
+// 		// 	},
+// 		// 	wantErr:     true,
+// 		// 	errContains: "topic already exists",
+// 		// },
+// 		// {
+// 		// 	name: "not enough brokers",
+// 		// 	request: &proto.CreateTopicRequest{
+// 		// 		TopicName:     "test-topic",
+// 		// 		NumPartitions: 5,
+// 		// 		ReplicaFactor: 2,
+// 		// 	},
+// 		// 	setupBroker: func(b *Broker) {},
+// 		// 	wantErr:     true,
+// 		// 	errContains: "not enough brokers available",
+// 		// },
 // 	}
+
+// 	// defer func() {
+// 	// 	if t.Failed() {
+// 	// 		zap.S().Info("Test failed, dumping goroutines:")
+// 	// 		dumpGoroutines()
+// 	// 	}
+// 	// }()
 
 // 	for _, tt := range tests {
 // 		t.Run(tt.name, func(t *testing.T) {
 // 			brokers, err := setupTestBroker(t, 3)
+// 			defer cleanupBrokers(t, brokers)
 // 			require.NoError(t, err)
 
-// 			time.Sleep(5 * time.Second)
-// 			tt.setupBroker(brokers[0])
 // 			broker := brokers[0]
 // 			resp, err := broker.CreateTopic(context.Background(), tt.request)
 // 			if tt.wantErr {
 // 				assert.Error(t, err)
 // 				assert.Contains(t, err.Error(), tt.errContains)
-// 				assert.False(t, resp.Success)
 // 			} else {
 // 				assert.NoError(t, err)
-// 				assert.True(t, resp.Success)
+// 				assert.Empty(t, resp.Error)
 
 // 				// Verify topic was created
 // 				broker.topicsMu.RLock()
@@ -167,7 +191,7 @@ func TestNewBroker(t *testing.T) {
 // }
 
 // func TestTopicDataOperations(t *testing.T) {
-// 	broker, err := setupTestBroker(t)
+// 	broker, err := setupTestBroker(t, 1)
 // 	require.NoError(t, err)
 
 // 	testTopic := "test-topic"
@@ -179,10 +203,10 @@ func TestNewBroker(t *testing.T) {
 // 	}
 
 // 	// Test UpdateTopicData
-// 	broker.UpdateTopicData(testTopic, testData)
+// 	broker[0].UpdateTopicData(testTopic, testData)
 
 // 	// Test GetTopicData
-// 	data, exists := broker.GetTopicData(testTopic)
+// 	data, exists := broker[0].GetTopicData(testTopic)
 // 	assert.True(t, exists)
 // 	assert.Equal(t, testData.Partitions, data.Partitions)
 
@@ -192,42 +216,42 @@ func TestNewBroker(t *testing.T) {
 // 			2: "localhost:3333",
 // 		},
 // 	}
-// 	broker.UpdateTopicData(testTopic, newData)
+// 	broker[0].UpdateTopicData(testTopic, newData)
 
-// 	data, exists = broker.GetTopicData(testTopic)
+// 	data, exists = broker[0].GetTopicData(testTopic)
 // 	assert.True(t, exists)
 // 	assert.Len(t, data.Partitions, 3)
 // 	assert.Equal(t, "localhost:3333", data.Partitions[2])
 // }
 
-// func TestBrokerStop(t *testing.T) {
-// 	broker, err := setupTestBroker(t)
-// 	require.NoError(t, err)
+// // func TestBrokerStop(t *testing.T) {
+// // 	broker, err := setupTestBroker(t, 1)
+// // 	require.NoError(t, err)
 
-// 	// Start the broker
-// 	go func() {
-// 		err := broker.Start("localhost:0")
-// 		require.NoError(t, err)
-// 	}()
+// // 	// Start the broker
+// // 	go func() {
+// // 		err := broker[0].Start("localhost:0")
+// // 		require.NoError(t, err)
+// // 	}()
 
-// 	// Allow time for startup
-// 	time.Sleep(100 * time.Millisecond)
+// // 	// Allow time for startup
+// // 	time.Sleep(100 * time.Millisecond)
 
-// 	// Test normal shutdown
-// 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-// 	defer cancel()
+// // 	// Test normal shutdown
+// // 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// // 	defer cancel()
 
-// 	err = broker.Stop(ctx)
-// 	assert.NoError(t, err)
+// // 	err = broker[0].Stop(ctx)
+// // 	assert.NoError(t, err)
 
-// 	// Test shutdown with cancelled context
-// 	broker, err = setupTestBroker(t)
-// 	require.NoError(t, err)
+// // 	// Test shutdown with cancelled context
+// // 	broker, err = setupTestBroker(t, 1)
+// // 	require.NoError(t, err)
 
-// 	ctx, cancel = context.WithCancel(context.Background())
-// 	cancel() // Cancel immediately
+// // 	ctx, cancel = context.WithCancel(context.Background())
+// // 	cancel() // Cancel immediately
 
-// 	err = broker.Stop(ctx)
-// 	assert.Error(t, err)
-// 	assert.Contains(t, err.Error(), "context canceled")
-// }
+// // 	err = broker[0].Stop(ctx)
+// // 	assert.Error(t, err)
+// // 	assert.Contains(t, err.Error(), "context canceled")
+// // }
