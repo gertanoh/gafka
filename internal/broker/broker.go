@@ -177,47 +177,56 @@ func (b *Broker) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (b *Broker) CreatePartition(ctx context.Context, req *proto.PartitionRequest) (*proto.PartitionResponse, error) {
+func (b *Broker) handlePartitionLeadershipChange(p *partition.Partition, isLeader bool) {
+	b.topicDataMu.Lock()
+	defer b.topicDataMu.Unlock()
 
-	b.topicsMu.Lock()
-	defer b.topicsMu.Unlock()
+	topicName := p.TopicName
+	partitionID := p.Id
 
-	port := dynaport.Get(1)
-	addr := fmt.Sprintf("%s:%d", b.nodeIP, port[0])
-
-	config := partition.Config{
-		Config: raft.Config{
-			LocalID: raft.ServerID(b.nodeName),
-		},
-		BindAddr:  addr,
-		Bootstrap: req.IsLeader,
-	}
-
-	p, err := partition.NewPartition(int(req.PartitionId), req.TopicName, config)
-	if err != nil {
-		return &proto.PartitionResponse{
-			Error: fmt.Sprintf("failed to create partition www: %v", err),
-		}, nil
-	}
-
-	if req.IsLeader {
-		// join followers to raft cluster
-		for node, nodeAddr := range req.FollowerAddrs {
-			if err := p.Join(node, nodeAddr); err != nil {
-				return &proto.PartitionResponse{
-					Error: fmt.Sprintf("failed to join followers to raft cluster due to : %v. Data is %+v", err, req.FollowerAddrs),
-				}, nil
-			}
+	// Get current topic metadata
+	topicData, exists := b.topicData[topicName]
+	if !exists {
+		topicData = discovery.TopicData{
+			Partitions: make(map[int]string),
 		}
 	}
-	// Initialize partition slice if it doesn't exist
-	if b.topics[req.TopicName] == nil {
-		b.topics[req.TopicName] = make([]*partition.Partition, req.NumPartitions)
+
+	if isLeader {
+		// Update partition leader address
+		topicData.Partitions[partitionID] = b.nodeIP + ":" + "port" // You'll need to add GetPort() to Partition
+		b.topicData[topicName] = topicData
+
+		// Broadcast leadership change
+		eventPayload, err := json.Marshal(struct {
+			Name string
+			Data discovery.TopicData
+		}{
+			Name: topicName,
+			Data: topicData,
+		})
+		if err != nil {
+			zap.S().Errorw("Failed to marshal topic update",
+				"topic", topicName,
+				"partition", partitionID,
+				"error", err)
+			return
+		}
+
+		if err := b.membership.Serf.UserEvent("topic_updated", eventPayload, true); err != nil {
+			zap.S().Errorw("Failed to broadcast topic update",
+				"topic", topicName,
+				"partition", partitionID,
+				"error", err)
+			return
+		}
 	}
+}
 
-	b.topics[req.TopicName][req.PartitionId] = p
+func (b *Broker) CreatePartition(ctx context.Context, req *proto.PartitionRequest) (*proto.PartitionResponse, error) {
 
-	return &proto.PartitionResponse{BindAddr: addr}, nil
+	addr, err := b.createLocalPartition(req.TopicName, int(req.PartitionId), int32(req.NumPartitions), req.IsLeader, req.FollowerAddrs)
+	return &proto.PartitionResponse{BindAddr: addr}, err
 }
 
 func (b *Broker) createLocalPartition(topicName string, partitionID int, nbPartitions int32,

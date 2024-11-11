@@ -48,9 +48,11 @@ type raftServer struct {
 	isLeader bool
 }
 
+type LeadershipChangeHandler func(partition *Partition, isLeader bool)
+
 type Partition struct {
-	id          int
-	topicName   string
+	Id          int
+	TopicName   string
 	log         *log.Log
 	raftNode    *raft.Raft
 	raftNet     *Transport
@@ -58,12 +60,15 @@ type Partition struct {
 	stableStore *raftboltdb.BoltStore
 	config      Config
 	dataDir     string
+
+	leaderObserver *raft.Observer
+	onLeaderChange LeadershipChangeHandler
 }
 
-func NewPartition(id int, topicName string, config Config) (*Partition, error) {
+func NewPartition(id int, TopicName string, config Config) (*Partition, error) {
 
 	p := &Partition{}
-	p.dataDir = topicName + "-" + strconv.Itoa(id)
+	p.dataDir = TopicName + "-" + strconv.Itoa(id)
 	if err := os.MkdirAll(p.dataDir, 0755); err != nil {
 		return nil, err
 	}
@@ -80,8 +85,8 @@ func NewPartition(id int, topicName string, config Config) (*Partition, error) {
 		return nil, err
 	}
 
-	p.id = id
-	p.topicName = topicName
+	p.Id = id
+	p.TopicName = TopicName
 	return p, nil
 }
 
@@ -203,6 +208,10 @@ func (p *Partition) Leave(id string) error {
 	return removeF.Error()
 }
 func (p *Partition) Close() error {
+	if p.leaderObserver != nil {
+		p.raftNode.DeregisterObserver(p.leaderObserver)
+	}
+
 	future := p.raftNode.Shutdown()
 	if err := future.Error(); err != nil {
 		return err
@@ -298,4 +307,32 @@ func (p *Partition) GetServers() ([]raftServer, error) {
 		res = append(res, raftS)
 	}
 	return res, nil
+}
+
+// Setup leadership change observer
+func (p *Partition) observeLeadership(handler LeadershipChangeHandler) {
+	p.onLeaderChange = handler
+	obsChan := make(chan raft.Observation, 1)
+	observer := raft.NewObserver(obsChan, false,
+		func(o *raft.Observation) bool {
+			switch o.Data.(type) {
+			case raft.LeaderObservation, raft.RaftState:
+				return true
+			default:
+				return false
+			}
+		})
+
+	p.raftNode.RegisterObserver(observer)
+	p.leaderObserver = observer
+
+	// Start goroutine to watch leadership changes
+	go func() {
+		for range obsChan {
+			isLeader := p.raftNode.State() == raft.Leader
+			if handler != nil {
+				handler(p, isLeader)
+			}
+		}
+	}()
 }
