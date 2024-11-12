@@ -342,7 +342,7 @@ func (p *Partition) observeLeadership() {
 			isLeader := p.raftNode.State() == raft.Leader
 			leaderAddr, _ := p.raftNode.LeaderWithID()
 
-			if p.leadershipObs != nil {
+			if p.leadershipObs != nil && isLeader {
 				p.leadershipObs.OnLeadershipChange(LeadershipChange{
 					PartitionID: p.id,
 					TopicName:   p.topicName,

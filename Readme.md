@@ -7,8 +7,8 @@ It is for educational purposes, but who knows?
 - [x] Log
 - [x] Partition / Topic / Replication
 - [x] Partition connectivity / Raft Group
-- [ ] Broker / Cluster Raft Group
-- [ ] Broker GRPC Server
+- [x] Broker / Cluster Raft Group
+- [x] Broker GRPC Server
 - [ ] CLI for produce/consume
 
 # Goals

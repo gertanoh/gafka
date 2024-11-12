@@ -429,15 +429,12 @@ func setupTestPartitionWithObserver(idx int, topicName string, observer Leadersh
 }
 
 func TestLeadershipObserver(t *testing.T) {
-	// Create mock observer
 	observer := newMockLeadershipObserver()
 
-	// Setup initial partition with observer
 	p, err := setupTestPartitionWithObserver(0, DEFAULT_TOPIC_NAME, observer)
 	require.NoError(t, err)
 	defer teardownTestPartition(p)
 
-	// Wait for initial leadership change notification
 	require.Eventually(t, func() bool {
 		changes := observer.getChanges()
 		if len(changes) == 0 {
@@ -452,20 +449,23 @@ func TestLeadershipObserver(t *testing.T) {
 }
 
 func TestLeadershipChangeObserver(t *testing.T) {
-	observer := newMockLeadershipObserver()
+	observers := make([]*mockLeadershipObserver, 2)
+	for i := range observers {
+		observers[i] = newMockLeadershipObserver()
+	}
 
-	// Create cluster of 3 partitions
+	// cluster of 3 partitions
 	partitions := make([]*Partition, 3)
 	var err error
 
-	// Create first partition with observer
-	partitions[0], err = setupTestPartitionWithObserver(0, DEFAULT_TOPIC_NAME, observer)
+	// first partition (leader)
+	partitions[0], err = setupTestPartitionWithObserver(0, DEFAULT_TOPIC_NAME, nil)
 	require.NoError(t, err)
 	defer teardownTestPartition(partitions[0])
 
-	// Create other partitions
+	// other partitions
 	for i := 1; i < 3; i++ {
-		partitions[i], err = setupTestPartition(i, DEFAULT_TOPIC_NAME)
+		partitions[i], err = setupTestPartitionWithObserver(i, DEFAULT_TOPIC_NAME, observers[i-1])
 		require.NoError(t, err)
 		defer teardownTestPartition(partitions[i])
 
@@ -473,35 +473,19 @@ func TestLeadershipChangeObserver(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Wait for initial leadership
-	require.Eventually(t, func() bool {
-		changes := observer.getChanges()
-		return len(changes) > 0 && changes[0].IsLeader
-	}, 2*time.Second, 100*time.Millisecond, "Initial leader not elected")
-
 	// Force leadership change by removing leader
 	err = partitions[0].Leave(strconv.Itoa(0))
 	require.NoError(t, err)
 
 	// Wait for leadership change notification
 	require.Eventually(t, func() bool {
-		changes := observer.getChanges()
-		// Should have at least 2 changes: initial leadership and loss of leadership
-		return len(changes) >= 2 && !changes[len(changes)-1].IsLeader
-	}, 2*time.Second, 100*time.Millisecond, "Did not receive leadership change notification")
-
-	// Verify the change sequence
-	changes := observer.getChanges()
-	require.GreaterOrEqual(t, len(changes), 2, "Should have received at least 2 leadership changes")
-
-	// First change should be becoming leader
-	require.True(t, changes[0].IsLeader, "First change should be becoming leader")
-	require.Equal(t, DEFAULT_TOPIC_NAME, changes[0].TopicName)
-	require.Equal(t, 0, changes[0].PartitionID)
-
-	// Last change should be losing leadership
-	lastChange := changes[len(changes)-1]
-	require.False(t, lastChange.IsLeader, "Last change should be losing leadership")
-	require.Equal(t, DEFAULT_TOPIC_NAME, lastChange.TopicName)
-	require.Equal(t, 0, lastChange.PartitionID)
+		var leadershipChangeNotified bool
+		for r := range observers {
+			changes := observers[r].getChanges()
+			if len(changes) != 0 && changes[len(changes)-1].IsLeader {
+				leadershipChangeNotified = true
+			}
+		}
+		return leadershipChangeNotified
+	}, 5*time.Second, 100*time.Millisecond, "Did not receive leadership change notification")
 }
