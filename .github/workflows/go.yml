@@ -28,7 +28,7 @@ jobs:
         make dev-deps
 
     - name: Build
-      run: make build/bins
+      run: make build
 
     - name: Audit
       run: make audit
