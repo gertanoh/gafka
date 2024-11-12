@@ -35,7 +35,11 @@ func setupTestBroker(t *testing.T, nbBrokers int) ([]*Broker, error) {
 			StartJoinAddrs: startJoinAddr,
 		}
 		broker, err := NewBroker("test-node-"+strconv.Itoa(i), "127.0.0.1", uint16(port[0]), memberConf)
-		broker.Start(addr)
+		require.NoError(t, err)
+
+		err = broker.Start(addr)
+		require.NoError(t, err)
+
 		brokers[i] = broker
 		require.NoError(t, err)
 
@@ -56,7 +60,7 @@ func cleanupBrokers(t *testing.T, brokers []*Broker) {
 
 	for _, match := range matches {
 		if err := os.RemoveAll(match); err != nil {
-			fmt.Errorf("failed to remove %s: %w", match, err)
+			_ = fmt.Errorf("failed to remove %s: %w", match, err)
 		}
 	}
 }

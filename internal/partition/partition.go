@@ -48,27 +48,35 @@ type raftServer struct {
 	isLeader bool
 }
 
-type LeadershipChangeHandler func(partition *Partition, isLeader bool)
-
-type Partition struct {
-	Id          int
+type LeadershipChange struct {
+	PartitionID int
 	TopicName   string
-	log         *log.Log
-	raftNode    *raft.Raft
-	raftNet     *Transport
-	logStore    *logStore
-	stableStore *raftboltdb.BoltStore
-	config      Config
-	dataDir     string
-
-	leaderObserver *raft.Observer
-	onLeaderChange LeadershipChangeHandler
+	IsLeader    bool
+	LeaderAddr  string
 }
 
-func NewPartition(id int, TopicName string, config Config) (*Partition, error) {
+type LeadershipObserver interface {
+	OnLeadershipChange(change LeadershipChange)
+}
+
+type Partition struct {
+	id            int
+	topicName     string
+	log           *log.Log
+	raftNode      *raft.Raft
+	raftNet       *Transport
+	logStore      *logStore
+	stableStore   *raftboltdb.BoltStore
+	config        Config
+	dataDir       string
+	leadershipObs LeadershipObserver
+	observer      *raft.Observer
+}
+
+func NewPartition(id int, topicName string, config Config, leadershipObserver LeadershipObserver) (*Partition, error) {
 
 	p := &Partition{}
-	p.dataDir = TopicName + "-" + strconv.Itoa(id)
+	p.dataDir = topicName + "-" + strconv.Itoa(id)
 	if err := os.MkdirAll(p.dataDir, 0755); err != nil {
 		return nil, err
 	}
@@ -85,8 +93,11 @@ func NewPartition(id int, TopicName string, config Config) (*Partition, error) {
 		return nil, err
 	}
 
-	p.Id = id
-	p.TopicName = TopicName
+	p.id = id
+	p.topicName = topicName
+	p.leadershipObs = leadershipObserver
+
+	p.observeLeadership()
 	return p, nil
 }
 
@@ -208,8 +219,8 @@ func (p *Partition) Leave(id string) error {
 	return removeF.Error()
 }
 func (p *Partition) Close() error {
-	if p.leaderObserver != nil {
-		p.raftNode.DeregisterObserver(p.leaderObserver)
+	if p.observer != nil {
+		p.raftNode.DeregisterObserver(p.observer)
 	}
 
 	future := p.raftNode.Shutdown()
@@ -246,9 +257,8 @@ func (p *Partition) Remove() error {
 	if err := p.raftNet.Close(); err != nil {
 		return err
 	}
-	p.log.Remove()
+	return p.log.Remove()
 
-	return nil
 }
 
 func (p *Partition) WaitForLeader(timeout time.Duration) (string, error) {
@@ -310,10 +320,10 @@ func (p *Partition) GetServers() ([]raftServer, error) {
 }
 
 // Setup leadership change observer
-func (p *Partition) observeLeadership(handler LeadershipChangeHandler) {
-	p.onLeaderChange = handler
-	obsChan := make(chan raft.Observation, 1)
-	observer := raft.NewObserver(obsChan, false,
+func (p *Partition) observeLeadership() {
+
+	obsChan := make(chan raft.Observation)
+	observer := raft.NewObserver(obsChan, true,
 		func(o *raft.Observation) bool {
 			switch o.Data.(type) {
 			case raft.LeaderObservation, raft.RaftState:
@@ -323,15 +333,22 @@ func (p *Partition) observeLeadership(handler LeadershipChangeHandler) {
 			}
 		})
 
+	p.observer = observer
 	p.raftNode.RegisterObserver(observer)
-	p.leaderObserver = observer
 
 	// Start goroutine to watch leadership changes
 	go func() {
 		for range obsChan {
 			isLeader := p.raftNode.State() == raft.Leader
-			if handler != nil {
-				handler(p, isLeader)
+			leaderAddr, _ := p.raftNode.LeaderWithID()
+
+			if p.leadershipObs != nil {
+				p.leadershipObs.OnLeadershipChange(LeadershipChange{
+					PartitionID: p.id,
+					TopicName:   p.topicName,
+					IsLeader:    isLeader,
+					LeaderAddr:  string(leaderAddr),
+				})
 			}
 		}
 	}()

@@ -177,49 +177,41 @@ func (b *Broker) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (b *Broker) handlePartitionLeadershipChange(p *partition.Partition, isLeader bool) {
+func (b *Broker) OnLeadershipChange(change partition.LeadershipChange) {
 	b.topicDataMu.Lock()
 	defer b.topicDataMu.Unlock()
 
-	topicName := p.TopicName
-	partitionID := p.Id
+	zap.S().Infof("Leadership change for topic %s partition %d: isLeader=%v, leaderAddr=%s",
+		change.TopicName, change.PartitionID, change.IsLeader, change.LeaderAddr)
 
-	// Get current topic metadata
-	topicData, exists := b.topicData[topicName]
+	data, exists := b.topicData[change.TopicName]
 	if !exists {
-		topicData = discovery.TopicData{
+		data = discovery.TopicData{
 			Partitions: make(map[int]string),
 		}
 	}
 
-	if isLeader {
-		// Update partition leader address
-		topicData.Partitions[partitionID] = b.nodeIP + ":" + "port" // You'll need to add GetPort() to Partition
-		b.topicData[topicName] = topicData
+	data.Partitions[change.PartitionID] = change.LeaderAddr
+	b.topicData[change.TopicName] = data
 
-		// Broadcast leadership change
-		eventPayload, err := json.Marshal(struct {
-			Name string
-			Data discovery.TopicData
-		}{
-			Name: topicName,
-			Data: topicData,
-		})
-		if err != nil {
-			zap.S().Errorw("Failed to marshal topic update",
-				"topic", topicName,
-				"partition", partitionID,
-				"error", err)
-			return
-		}
+	// Broadcast the change via Serf
+	topicEvent := struct {
+		Name string
+		Data discovery.TopicData
+	}{
+		Name: change.TopicName,
+		Data: data,
+	}
 
-		if err := b.membership.Serf.UserEvent("topic_updated", eventPayload, true); err != nil {
-			zap.S().Errorw("Failed to broadcast topic update",
-				"topic", topicName,
-				"partition", partitionID,
-				"error", err)
-			return
-		}
+	eventPayload, err := json.Marshal(topicEvent)
+	if err != nil {
+		zap.S().Errorf("Failed to marshal topic update: %v", err)
+		return
+	}
+
+	if err := b.membership.Serf.UserEvent("topic_updated", eventPayload, true); err != nil {
+		zap.S().Errorf("Failed to broadcast topic update: %v", err)
+		return
 	}
 }
 
@@ -242,7 +234,7 @@ func (b *Broker) createLocalPartition(topicName string, partitionID int, nbParti
 		Bootstrap: isLeader,
 	}
 
-	p, err := partition.NewPartition(partitionID, topicName, config)
+	p, err := partition.NewPartition(partitionID, topicName, config, b)
 	if err != nil {
 		return "", fmt.Errorf("failed to create local follower: %w", err)
 	}
@@ -309,7 +301,7 @@ func (b *Broker) createRemotePartition(ctx context.Context, topicName string, pa
 			return err
 		}
 		if resp.Error != "" {
-			return fmt.Errorf(resp.Error)
+			return fmt.Errorf("failed to create remote partition, retrying %s", resp.Error)
 		}
 		bindAddr = resp.BindAddr
 		return nil
@@ -570,7 +562,7 @@ func (pc *partitionCreation) cleanup() {
 	for topicName, partitions := range pc.partitions {
 		for _, partition := range partitions {
 			if partition != nil {
-				partition.Remove()
+				_ = partition.Remove()
 			}
 		}
 		delete(pc.broker.topics, topicName)
