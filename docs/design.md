@@ -71,6 +71,9 @@ Each partition is a log, and is replicated by the replication factor.
 ![alt text](image.png)
 
 
+Came to the conclusion that relying purely on gossip for metadata management can lead to inconsistencies and failures.
+For V2, let's follow the traditional controller-based kafka architecture.
+
 # Resources 
 - https://github.com/rqlite/rqlite/tree/master
 - Book Building Distributed Services in Go

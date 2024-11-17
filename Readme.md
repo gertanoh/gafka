@@ -3,18 +3,21 @@ Building a system that resembles Kafka. Producers shall be able to send data to 
 It is for educational purposes, but who knows?
 
 
-# Expected Features / Progress of dev
+# V1 Features 
 - [x] Log
 - [x] Partition / Topic / Replication
 - [x] Partition connectivity / Raft Group
 - [x] Broker / Cluster Raft Group
 - [x] Broker GRPC Server
-- [ ] Producer
-- [ ] Consumer
-- [ ] CLI for produce/consume
+
+Came to the conclusion that relying purely on gossip for metadata management can lead to inconsistencies and failures.
+
+# V2 
+let's follow the traditional controller-based kafka architecture.
+
 
 # Goals
-- Trivial to install
+- Trivial to install    
 - Ease to use
 - Ease to operate (need metrics)
 
