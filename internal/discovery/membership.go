@@ -19,8 +19,12 @@ type Config struct {
 	Tags           map[string]string // use to share information
 	StartJoinAddrs []string
 }
-type TopicData struct {
-	Partitions map[int]string `json:"partitions"` // Partition Id to leader rpc
+
+// TODO add versionning to metadata
+type MetadataUpdate struct {
+	TopicName   string
+	PartitionId int
+	LeaderAddr  string
 }
 
 type Membership struct {
@@ -36,8 +40,9 @@ type Membership struct {
 type Handler interface {
 	Join(name, addr string) error
 	Leave(name string) error
-	UpdateTopicData(topicName string, data TopicData)
-	GetTopicData(topicName string) (TopicData, bool)
+	UpdateTopicData(data []MetadataUpdate)
+	GetTopicData(topicName string, partitionId int) (MetadataUpdate, bool)
+	GetAllTopics() []string
 }
 
 func New(handler Handler, config Config) (*Membership, error) {
@@ -157,29 +162,30 @@ func (m *Membership) Leave() error {
 
 func (m *Membership) handleUserEvent(e serf.UserEvent) {
 	if e.Name == "topic_created" || e.Name == "topic_updated" {
-		var topicData struct {
-			Name string
-			Data TopicData
-		}
+		var topicData []MetadataUpdate
 		if err := json.Unmarshal(e.Payload, &topicData); err != nil {
 			m.logger.Error("Failed to unmarshall topic data", zap.Error(err))
 			return
 		}
 
 		// call to handler of broker
-		m.handler.UpdateTopicData(topicData.Name, topicData.Data)
+		m.handler.UpdateTopicData(topicData)
 	}
 }
 
 func (m *Membership) handleQuery(q *serf.Query) {
-	if q.Name == "get_topic_leader" {
-		var topicName string
-		if err := json.Unmarshal(q.Payload, &topicName); err != nil {
+	switch q.Name {
+	case "get_topic_leader":
+		var topicInfo struct {
+			Name        string
+			PartitionId int
+		}
+		if err := json.Unmarshal(q.Payload, &topicInfo); err != nil {
 			m.logger.Error("Failed to unmarshal topic name from query", zap.Error(err))
 			return
 		}
 
-		topicData, exists := m.handler.GetTopicData(topicName)
+		topicData, exists := m.handler.GetTopicData(topicInfo.Name, topicInfo.PartitionId)
 		if !exists {
 			return
 		}
@@ -192,7 +198,18 @@ func (m *Membership) handleQuery(q *serf.Query) {
 
 		err = q.Respond(res)
 		if err != nil {
-			m.logger.Error("Failed to respond to query", zap.Error(err))
+			m.logger.Error("Failed to respond to topic leader query", zap.Error(err))
+		}
+	case "list_topics":
+		topics := m.handler.GetAllTopics()
+		res, err := json.Marshal(topics)
+		if err != nil {
+			m.logger.Error("Failed to marshal all topics response", zap.Error(err))
+			return
+		}
+		err = q.Respond(res)
+		if err != nil {
+			m.logger.Error("Failed to respond to list_topics_query", zap.Error(err))
 		}
 	}
 }

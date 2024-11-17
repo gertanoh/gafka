@@ -3,6 +3,7 @@ package discovery
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -42,21 +43,15 @@ func TestMembership(t *testing.T) {
 
 	// Test topic creation and query
 	topicName := "test-topic"
-	topicData := TopicData{
-		Partitions: map[int]string{
-			0: "leader-1",
-			1: "leader-2",
-		},
+	topicData := make([]MetadataUpdate, 1)
+	topicData[0] = MetadataUpdate{
+		TopicName:   topicName,
+		PartitionId: 0,
+		LeaderAddr:  "leader-1",
 	}
 
 	// Broadcast topic creation
-	payload, err := json.Marshal(struct {
-		Name string
-		Data TopicData
-	}{
-		Name: topicName,
-		Data: topicData,
-	})
+	payload, err := json.Marshal(topicData)
 	require.NoError(t, err)
 	require.NoError(t, m[0].Serf.UserEvent("topic_created", payload, true))
 
@@ -68,11 +63,24 @@ func TestMembership(t *testing.T) {
 		h4.mu.Lock()
 		defer h4.mu.Unlock()
 		data, exists := h4.topicData[topicName]
-		return exists && len(data.Partitions) == 2
+		if !exists {
+			return false
+		}
+		addr, exists := data[topicData[0].PartitionId]
+		if !exists {
+			return false
+		}
+		return addr == "leader-1"
 	}, 1*time.Second, 250*time.Millisecond)
 
 	// Test query for topic leader
-	queryPayload, err := json.Marshal(topicName)
+	queryPayload, err := json.Marshal(struct {
+		Name        string
+		PartitionId int
+	}{
+		Name:        topicName,
+		PartitionId: 0,
+	})
 	require.NoError(t, err)
 
 	resp, err := m[1].Serf.Query("get_topic_leader", queryPayload, &serf.QueryParam{
@@ -80,14 +88,16 @@ func TestMembership(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	var receivedTopicData TopicData
-	for r := range resp.ResponseCh() {
-		err = json.Unmarshal(r.Payload, &receivedTopicData)
-		require.NoError(t, err)
-		break
-	}
+	require.Eventually(t, func() bool {
+		var receivedTopicData MetadataUpdate
+		for r := range resp.ResponseCh() {
+			err = json.Unmarshal(r.Payload, &receivedTopicData)
+			require.NoError(t, err)
+			break
+		}
+		return reflect.DeepEqual(topicData[0], receivedTopicData)
 
-	require.Equal(t, topicData, receivedTopicData)
+	}, time.Second, 250*time.Millisecond)
 }
 
 func setupMember(t *testing.T, members []*Membership) ([]*Membership,
@@ -115,7 +125,7 @@ func setupMember(t *testing.T, members []*Membership) ([]*Membership,
 			members[0].BindAddr,
 		}
 	}
-	h.topicData = make(map[string]TopicData)
+	h.topicData = make(map[string]map[int]string)
 	h.nodeName = fmt.Sprintf("%d", id)
 	m, err := New(h, c)
 	require.NoError(t, err)
@@ -126,7 +136,7 @@ func setupMember(t *testing.T, members []*Membership) ([]*Membership,
 type handler struct {
 	joins     chan map[string]string
 	leaves    chan string
-	topicData map[string]TopicData
+	topicData map[string]map[int]string
 	mu        sync.RWMutex
 	nodeName  string
 }
@@ -148,15 +158,36 @@ func (h *handler) Leave(id string) error {
 	return nil
 }
 
-func (h *handler) UpdateTopicData(topicName string, data TopicData) {
+func (h *handler) UpdateTopicData(data []MetadataUpdate) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.topicData[topicName] = data
+	for _, topicData := range data {
+		if h.topicData[topicData.TopicName] == nil {
+			h.topicData[topicData.TopicName] = make(map[int]string)
+		}
+		h.topicData[topicData.TopicName][topicData.PartitionId] = topicData.LeaderAddr
+	}
 }
 
-func (h *handler) GetTopicData(topicName string) (TopicData, bool) {
+func (h *handler) GetTopicData(topicName string, partitionId int) (MetadataUpdate, bool) {
 	h.mu.RLock()
-	defer h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.topicData[topicName] == nil {
+		h.topicData[topicName] = make(map[int]string)
+	}
 	data, exists := h.topicData[topicName]
-	return data, exists
+	if !exists {
+		return MetadataUpdate{}, exists
+	}
+	return MetadataUpdate{TopicName: topicName, PartitionId: partitionId, LeaderAddr: data[partitionId]}, exists
+}
+
+func (h *handler) GetAllTopics() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	topics := make([]string, 0, len(h.topicData))
+	for topicName := range h.topicData {
+		topics = append(topics, topicName)
+	}
+	return topics
 }

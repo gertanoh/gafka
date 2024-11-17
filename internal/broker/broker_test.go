@@ -105,8 +105,8 @@ func TestNewBroker(t *testing.T) {
 				assert.NoError(t, err)
 				assert.NotNil(t, broker)
 				assert.Equal(t, tt.nodeName, broker.nodeName)
-				assert.NotNil(t, broker.topics)
-				assert.NotNil(t, broker.topicData)
+				assert.NotNil(t, broker.localPartitions)
+				assert.NotNil(t, broker.topicMetadata)
 			}
 		})
 	}
@@ -139,7 +139,7 @@ func TestCreateTopic(t *testing.T) {
 			},
 			setupBroker: func(b *Broker) {
 				b.topicsMu.Lock()
-				b.topics["test-topic-existing"] = make([]*partition.Partition, 1)
+				b.localPartitions["test-topic-existing"] = make([]*partition.Partition, 1)
 				b.topicsMu.Unlock()
 			},
 			wantErr:     true,
@@ -176,7 +176,7 @@ func TestCreateTopic(t *testing.T) {
 
 				// Verify topic was created
 				broker.topicsMu.RLock()
-				partitions, exists := broker.topics[tt.request.TopicName]
+				partitions, exists := broker.localPartitions[tt.request.TopicName]
 				broker.topicsMu.RUnlock()
 
 				assert.True(t, exists)
@@ -184,9 +184,9 @@ func TestCreateTopic(t *testing.T) {
 
 				// Verify topic metadata
 				require.Eventually(t, func() bool {
-					broker.topicDataMu.RLock()
-					metadata, exists := broker.topicData[tt.request.TopicName]
-					broker.topicDataMu.RUnlock()
+					broker.topicMetadataMu.RLock()
+					metadata, exists := broker.topicMetadata[tt.request.TopicName]
+					broker.topicMetadataMu.RUnlock()
 					if !exists {
 						return false
 					}
@@ -207,33 +207,38 @@ func TestTopicDataOperations(t *testing.T) {
 	require.NoError(t, err)
 
 	testTopic := "test-topic"
-	testData := discovery.TopicData{
-		Partitions: map[int]string{
-			0: "localhost:1111",
-			1: "localhost:2222",
-		},
+	testData := make([]discovery.MetadataUpdate, 2)
+	testData[0] = discovery.MetadataUpdate{
+		TopicName:   testTopic,
+		PartitionId: 0,
+		LeaderAddr:  "localhost:1111",
+	}
+	testData[1] = discovery.MetadataUpdate{
+		TopicName:   testTopic,
+		PartitionId: 1,
+		LeaderAddr:  "localhost:2222",
 	}
 
 	// Test UpdateTopicData
-	broker[0].UpdateTopicData(testTopic, testData)
+	broker[0].UpdateTopicData(testData)
 
 	// Test GetTopicData
-	data, exists := broker[0].GetTopicData(testTopic)
+	data, exists := broker[0].GetTopicData(testTopic, 0)
 	assert.True(t, exists)
-	assert.Equal(t, testData.Partitions, data.Partitions)
+	assert.Equal(t, testData[0], data)
 
 	// Test update existing topic
-	newData := discovery.TopicData{
-		Partitions: map[int]string{
-			2: "localhost:3333",
-		},
+	newData := make([]discovery.MetadataUpdate, 1)
+	newData[0] = discovery.MetadataUpdate{
+		TopicName:   testTopic,
+		PartitionId: 2,
+		LeaderAddr:  "localhost:3333",
 	}
-	broker[0].UpdateTopicData(testTopic, newData)
+	broker[0].UpdateTopicData(newData)
 
-	data, exists = broker[0].GetTopicData(testTopic)
+	data, exists = broker[0].GetTopicData(testTopic, 2)
 	assert.True(t, exists)
-	assert.Len(t, data.Partitions, 3)
-	assert.Equal(t, "localhost:3333", data.Partitions[2])
+	assert.Equal(t, "localhost:3333", data.LeaderAddr)
 }
 
 func TestBrokerStop(t *testing.T) {

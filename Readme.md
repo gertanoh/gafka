@@ -9,6 +9,8 @@ It is for educational purposes, but who knows?
 - [x] Partition connectivity / Raft Group
 - [x] Broker / Cluster Raft Group
 - [x] Broker GRPC Server
+- [ ] Producer
+- [ ] Consumer
 - [ ] CLI for produce/consume
 
 # Goals

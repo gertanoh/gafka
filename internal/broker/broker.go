@@ -28,33 +28,37 @@ const (
 	RetryDelay         = time.Second
 )
 
+type TopicMetadata struct {
+	Partitions map[int]string `json:"partitions"` // (partition ID -> leader RPC address)
+}
+
 type Broker struct {
 	proto.UnimplementedGafkaServiceServer
-	topicsMu    sync.RWMutex
-	topics      map[string][]*partition.Partition // topics to list of partitions handled by current broker
-	grpcServer  *grpc.Server
-	membership  *discovery.Membership
-	nodeName    string
-	nodeIP      string
-	nodePort    uint16
-	topicDataMu sync.RWMutex
-	topicData   map[string]discovery.TopicData // topic name to metadata
+	topicsMu        sync.RWMutex
+	localPartitions map[string][]*partition.Partition // Local partitions (leader/follower) indexed by topic and partition ID
+	grpcServer      *grpc.Server
+	membership      *discovery.Membership
+	nodeName        string
+	nodeIP          string
+	nodePort        uint16
+	topicMetadataMu sync.RWMutex
+	topicMetadata   map[string]TopicMetadata
 }
 
 type partitionCreation struct {
 	partitions map[string][]*partition.Partition // topic to list of partitions
 	success    bool
-	topicData  discovery.TopicData
+	topicData  []discovery.MetadataUpdate
 	broker     *Broker
 }
 
 func NewBroker(nodeName string, nodeIP string, nodePort uint16, memberConf discovery.Config) (*Broker, error) {
 	b := &Broker{
-		topics:    make(map[string][]*partition.Partition),
-		nodeName:  nodeName,
-		nodeIP:    nodeIP,
-		nodePort:  nodePort,
-		topicData: make(map[string]discovery.TopicData),
+		localPartitions: make(map[string][]*partition.Partition),
+		nodeName:        nodeName,
+		nodeIP:          nodeIP,
+		nodePort:        nodePort,
+		topicMetadata:   make(map[string]TopicMetadata),
 	}
 
 	membership, err := discovery.New(b, memberConf)
@@ -138,7 +142,7 @@ func (b *Broker) Stop(ctx context.Context) error {
 				b.topicsMu.RLock()
 				defer b.topicsMu.RUnlock()
 
-				for topicName, partitions := range b.topics {
+				for topicName, partitions := range b.localPartitions {
 					select {
 					case <-ctx.Done():
 						return fmt.Errorf("partition shutdown interrupted: %w", ctx.Err())
@@ -178,29 +182,27 @@ func (b *Broker) Stop(ctx context.Context) error {
 }
 
 func (b *Broker) OnLeadershipChange(change partition.LeadershipChange) {
-	b.topicDataMu.Lock()
-	defer b.topicDataMu.Unlock()
+	b.topicMetadataMu.Lock()
+	defer b.topicMetadataMu.Unlock()
 
 	zap.S().Infof("Leadership change for topic %s partition %d: isLeader=%v, leaderAddr=%s",
 		change.TopicName, change.PartitionID, change.IsLeader, change.LeaderAddr)
 
-	data, exists := b.topicData[change.TopicName]
+	data, exists := b.topicMetadata[change.TopicName]
 	if !exists {
-		data = discovery.TopicData{
+		data = TopicMetadata{
 			Partitions: make(map[int]string),
 		}
 	}
 
 	data.Partitions[change.PartitionID] = change.LeaderAddr
-	b.topicData[change.TopicName] = data
+	b.topicMetadata[change.TopicName] = data
 
 	// Broadcast the change via Serf
-	topicEvent := struct {
-		Name string
-		Data discovery.TopicData
-	}{
-		Name: change.TopicName,
-		Data: data,
+	topicEvent := discovery.MetadataUpdate{
+		TopicName:   change.TopicName,
+		PartitionId: change.PartitionID,
+		LeaderAddr:  change.LeaderAddr,
 	}
 
 	eventPayload, err := json.Marshal(topicEvent)
@@ -259,10 +261,10 @@ func (b *Broker) createLocalPartition(topicName string, partitionID int, nbParti
 		}
 	}
 	// Initialize partition slice if it doesn't exist
-	if b.topics[topicName] == nil {
-		b.topics[topicName] = make([]*partition.Partition, nbPartitions)
+	if b.localPartitions[topicName] == nil {
+		b.localPartitions[topicName] = make([]*partition.Partition, nbPartitions)
 	}
-	b.topics[topicName][partitionID] = p
+	b.localPartitions[topicName][partitionID] = p
 	return bindAddr, nil
 }
 
@@ -324,10 +326,7 @@ func (b *Broker) createRemotePartition(ctx context.Context, topicName string, pa
 // TODO how do we handle remote partition clean up
 func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest) (*proto.CreateTopicResponse, error) {
 
-	b.topicsMu.Lock()
-	defer b.topicsMu.Unlock()
-
-	if _, exists := b.topics[req.TopicName]; exists { // TODO shall send a query
+	if b.topicExists(req.TopicName) { // TODO shall send a query
 		return &proto.CreateTopicResponse{}, fmt.Errorf("topic already exists")
 	}
 
@@ -343,10 +342,8 @@ func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest)
 	pc := &partitionCreation{
 		partitions: make(map[string][]*partition.Partition),
 		success:    false,
-		topicData: discovery.TopicData{
-			Partitions: make(map[int]string),
-		},
-		broker: b,
+		topicData:  make([]discovery.MetadataUpdate, req.NumPartitions),
+		broker:     b,
 	}
 	pc.partitions[req.TopicName] = make([]*partition.Partition, req.NumPartitions)
 	defer pc.cleanup()
@@ -377,7 +374,7 @@ func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest)
 				if err != nil {
 					return &proto.CreateTopicResponse{}, fmt.Errorf("failed to create follower for partition %d: %w", i, err)
 				}
-				pc.partitions[req.TopicName][i] = b.topics[req.TopicName][i]
+				pc.partitions[req.TopicName][i] = b.localPartitions[req.TopicName][i]
 			} else {
 				bindAddr, err = b.createRemotePartition(ctx, req.TopicName, i, req.NumPartitions, rpcAddr, false, map[string]string{})
 				if err != nil {
@@ -395,22 +392,14 @@ func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest)
 		}
 
 		if leaderMember.Tags["node_name"] == b.nodeName {
-			pc.partitions[req.TopicName][i] = b.topics[req.TopicName][i]
+			pc.partitions[req.TopicName][i] = b.localPartitions[req.TopicName][i]
 		}
 
-		pc.topicData.Partitions[i] = leaderAddr
+		pc.topicData[i] = discovery.MetadataUpdate{TopicName: req.TopicName, PartitionId: i, LeaderAddr: leaderAddr}
 	}
 
 	// broadcast topic creation to others brokers with serf
-	topicEvent := struct {
-		Name string
-		Data discovery.TopicData
-	}{
-		Name: req.TopicName,
-		Data: pc.topicData,
-	}
-
-	eventPayload, err := json.Marshal(topicEvent)
+	eventPayload, err := json.Marshal(pc.topicData)
 	if err != nil {
 		return &proto.CreateTopicResponse{},
 			fmt.Errorf("failed to marshal topic event: %v", err)
@@ -424,20 +413,16 @@ func (b *Broker) CreateTopic(ctx context.Context, req *proto.CreateTopicRequest)
 	return &proto.CreateTopicResponse{}, nil
 }
 
-// Routing is done at the networking layer
-// Broker is the leader of the partitions
-
+// Routing is done at the producer level
 func (b *Broker) Write(ctx context.Context, req *proto.WriteRequest) (*proto.WriteResponse, error) {
 
 	b.topicsMu.RLock()
 	defer b.topicsMu.RUnlock()
 
-	partitions, exists := b.topics[req.Topic]
+	partitions, exists := b.localPartitions[req.Topic]
 	if !exists {
 		return &proto.WriteResponse{Success: false}, fmt.Errorf("topic does not exist")
 	}
-
-	// partitions load balancing shall be done at the network layer
 
 	partitionIndex := helpers.ComputeHash(req.Key) % uint32(len(partitions))
 
@@ -454,7 +439,7 @@ func (b *Broker) Read(ctx context.Context, req *proto.ReadRequest) (*proto.ReadR
 
 	b.topicsMu.RLock()
 	defer b.topicsMu.RUnlock()
-	partitions, exists := b.topics[req.Topic]
+	partitions, exists := b.localPartitions[req.Topic]
 	if !exists {
 		return &proto.ReadResponse{Success: false}, fmt.Errorf("topic does not exist")
 	}
@@ -501,12 +486,47 @@ func (b *Broker) ReadStream(req *proto.ReadRequest, stream proto.GafkaService_Re
 
 func (b *Broker) ListTopics(ctx context.Context, req *proto.ListTopicsRequest) (*proto.ListTopicsResponse, error) {
 
+	topicsSet := make(map[string]struct{})
+
+	// Get local topics
 	b.topicsMu.RLock()
-	defer b.topicsMu.RUnlock()
-	topics := make([]string, 0, len(b.topics))
-	for topic := range b.topics {
+	for topic := range b.localPartitions {
+		topicsSet[topic] = struct{}{}
+	}
+	b.topicsMu.RUnlock()
+
+	//query, err := b.membership.Serf.Query("list_topics", nil, &serf.QueryParam{
+	//	Timeout: 5 * time.Second,
+	//})
+	query, err := b.membership.Serf.Query("list_topics", nil, nil)
+	if err != nil {
+		zap.S().Warnf("Failed to query other brokers for topics: %v", err)
+	} else {
+		for response := range query.ResponseCh() {
+			var topics []string
+			if err := json.Unmarshal(response.Payload, &topics); err != nil {
+				zap.S().Warnf("Failed to unmarshal topics from broker: %v", err)
+				continue
+			}
+			for _, topic := range topics {
+				topicsSet[topic] = struct{}{}
+			}
+		}
+	}
+
+	topics := make([]string, 0, len(topicsSet))
+	for topic := range topicsSet {
 		topics = append(topics, topic)
 	}
+
+	// check metadata metadata
+	b.topicMetadataMu.RLock()
+	for topic := range b.topicMetadata {
+		if _, exists := topicsSet[topic]; !exists {
+			topics = append(topics, topic)
+		}
+	}
+	b.topicMetadataMu.RUnlock()
 
 	return &proto.ListTopicsResponse{Topics: topics}, nil
 }
@@ -520,38 +540,44 @@ func (b *Broker) Leave(name string) error {
 }
 
 // return local metadata for topic
-func (b *Broker) GetTopicData(topicName string) (discovery.TopicData, bool) {
-	b.topicDataMu.RLock()
-	defer b.topicDataMu.RUnlock()
+func (b *Broker) GetTopicData(topicName string, partitionId int) (discovery.MetadataUpdate, bool) {
+	b.topicMetadataMu.RLock()
+	defer b.topicMetadataMu.RUnlock()
 
-	data, exits := b.topicData[topicName]
-	return data, exits
+	data, exits := b.topicMetadata[topicName]
+	if !exits {
+		return discovery.MetadataUpdate{}, false
+	}
+
+	return discovery.MetadataUpdate{TopicName: topicName, PartitionId: partitionId, LeaderAddr: data.Partitions[partitionId]}, true
 }
 
 // called when receiving metadata update for a topic
-func (b *Broker) UpdateTopicData(topicName string, data discovery.TopicData) {
-	b.topicDataMu.Lock()
-	defer b.topicDataMu.Unlock()
+func (b *Broker) UpdateTopicData(data []discovery.MetadataUpdate) {
+	b.topicMetadataMu.Lock()
+	defer b.topicMetadataMu.Unlock()
 
-	topicData, exists := b.topicData[topicName]
-	if exists {
-		if topicData.Partitions == nil {
-			topicData.Partitions = make(map[int]string)
+	for _, update := range data {
+		_, exists := b.topicMetadata[update.TopicName]
+		if !exists {
+			b.topicMetadata[update.TopicName] = TopicMetadata{Partitions: make(map[int]string)}
 		}
-		for partID, leaderAddr := range data.Partitions {
-			topicData.Partitions[partID] = leaderAddr
-		}
-		b.topicData[topicName] = topicData
-	} else {
-		if data.Partitions == nil {
-			data.Partitions = make(map[int]string)
-		}
-		b.topicData[topicName] = data
+		b.topicMetadata[update.TopicName].Partitions[update.PartitionId] = update.LeaderAddr
+		zap.S().Infow("Updated topic metadata",
+			"topic", update.TopicName,
+			"partitionId", update.PartitionId,
+			"metadata", update.LeaderAddr)
 	}
-	zap.S().Infow("Updated topic metadata",
-		"topic", topicName,
-		"partitions", len(data.Partitions),
-		"metadata", data)
+}
+
+func (b *Broker) GetAllTopics() []string {
+	b.topicMetadataMu.RLock()
+	defer b.topicMetadataMu.RUnlock()
+	topics := make([]string, 0, len(b.localPartitions))
+	for topic := range b.localPartitions {
+		topics = append(topics, topic)
+	}
+	return topics
 }
 
 func (pc *partitionCreation) cleanup() {
@@ -565,6 +591,47 @@ func (pc *partitionCreation) cleanup() {
 				_ = partition.Remove()
 			}
 		}
-		delete(pc.broker.topics, topicName)
+		delete(pc.broker.localPartitions, topicName)
 	}
+}
+
+func (b *Broker) topicExists(topicName string) bool {
+	// Check local
+	b.topicsMu.RLock()
+	_, exists := b.localPartitions[topicName]
+	b.topicsMu.RUnlock()
+	if exists {
+		return true
+	}
+
+	// Check metadata
+	b.topicMetadataMu.RLock()
+	_, exists = b.topicMetadata[topicName]
+	b.topicMetadataMu.RUnlock()
+	if exists {
+		return true
+	}
+
+	// Query other brokers
+	query, err := b.membership.Serf.Query("list_topics", nil, &serf.QueryParam{
+		Timeout: 2 * time.Second,
+	})
+	if err != nil {
+		zap.S().Warnf("Failed to query brokers for topic existence: %v", err)
+		return false
+	}
+
+	for response := range query.ResponseCh() {
+		var topics []string
+		if err := json.Unmarshal(response.Payload, &topics); err != nil {
+			continue
+		}
+		for _, topic := range topics {
+			if topic == topicName {
+				return true
+			}
+		}
+	}
+
+	return false
 }
