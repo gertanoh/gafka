@@ -246,13 +246,8 @@ func TestBrokerStop(t *testing.T) {
 	require.NoError(t, err)
 
 	// Start the broker
-	go func() {
-		err := broker[0].Start("localhost:0")
-		require.NoError(t, err)
-	}()
-
-	// Allow time for startup
-	time.Sleep(100 * time.Millisecond)
+	err = broker[0].Start("localhost:0")
+	require.NoError(t, err)
 
 	// Test normal shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

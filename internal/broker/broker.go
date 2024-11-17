@@ -72,6 +72,8 @@ func NewBroker(nodeName string, nodeIP string, nodePort uint16, memberConf disco
 }
 
 func (b *Broker) Start(address string) error {
+	var startupError error
+	ready := make(chan struct{})
 	lis, err := net.Listen("tcp", address)
 	if err != nil {
 		return fmt.Errorf("failed to listen: %v", err)
@@ -82,11 +84,16 @@ func (b *Broker) Start(address string) error {
 
 	zap.S().Infof("Starting gRPC server on %s", address)
 	go func() {
+		close(ready)
 		if err := b.grpcServer.Serve(lis); err != nil {
-			zap.S().Errorf("Failed to serve grpc:  %v", err)
+			if err != grpc.ErrServerStopped {
+				startupError = err
+				zap.S().Errorf("Failed to serve grpc:  %v", err)
+			}
 		}
 	}()
-	return nil
+	<-ready
+	return startupError
 }
 
 func (b *Broker) Stop(ctx context.Context) error {
