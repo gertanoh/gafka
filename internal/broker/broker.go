@@ -431,9 +431,7 @@ func (b *Broker) Write(ctx context.Context, req *proto.WriteRequest) (*proto.Wri
 		return &proto.WriteResponse{Success: false}, fmt.Errorf("topic does not exist")
 	}
 
-	partitionIndex := helpers.ComputeHash(req.Key) % uint32(len(partitions))
-
-	err := partitions[partitionIndex].Write([]byte(req.Payload))
+	err := partitions[req.PartitionId].Write([]byte(req.Payload))
 	if err != nil {
 		zap.S().Error("broker:write Failed to write to log due to %s", err)
 		return &proto.WriteResponse{Success: true, Error: err.Error()}, nil

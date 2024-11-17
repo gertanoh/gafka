@@ -41,7 +41,7 @@ message CreateTopicResponse {
 
 message WriteRequest {
   string topic = 1;
-  string key = 2;
+  int32 partition_id = 2;
   string payload = 3;
 }
 
@@ -67,3 +67,12 @@ message ListTopicsRequest {}
 message ListTopicsResponse {
   repeated string topics = 1;
 }
+
+message GetTopicMetadataRequest {
+  string topic = 1;
+}
+
+message GetTopicMetadataResponse {
+  string topic = 1;
+  map<int32, string> partition_leaders = 2; // partition_id -> leader_addr
+} 

@@ -83,7 +83,7 @@ func TestMembership(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resp, err := m[1].Serf.Query("get_topic_leader", queryPayload, &serf.QueryParam{
+	resp, err := m[1].Serf.Query("get_partition_leader", queryPayload, &serf.QueryParam{
 		Timeout: 1 * time.Second,
 	})
 	require.NoError(t, err)

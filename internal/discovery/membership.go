@@ -175,7 +175,7 @@ func (m *Membership) handleUserEvent(e serf.UserEvent) {
 
 func (m *Membership) handleQuery(q *serf.Query) {
 	switch q.Name {
-	case "get_topic_leader":
+	case "get_partition_leader":
 		var topicInfo struct {
 			Name        string
 			PartitionId int
